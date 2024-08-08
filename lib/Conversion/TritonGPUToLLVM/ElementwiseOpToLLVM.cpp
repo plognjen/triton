@@ -27,6 +27,12 @@ int getNumElementsPerThreads(Type type,
     if (structType)
       numElemsPerThread = structType.getBody().size();
   }
+
+  auto vectorType =
+      dyn_cast<mlir::VectorType>(typeConverter->convertType(type));
+  if (vectorType) {
+    numElemsPerThread = vectorType.getDimSize(0);
+  }
   return numElemsPerThread;
 }
 
