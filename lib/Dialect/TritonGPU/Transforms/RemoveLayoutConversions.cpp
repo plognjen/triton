@@ -974,7 +974,10 @@ void LayoutRematerialization::backwardRematerialization(
   RankedTensorType targetType = convertOp.getType();
   // We stop the rematerialization of linear layouts as we have to be a bit more
   // careful with the heuristics for both correctness and perf
-  if (isa<DotOperandEncodingAttr, LinearEncodingAttr>(targetType.getEncoding()))
+  if (isa<LinearEncodingAttr>(targetType.getEncoding()))
+
+  auto dotEnc = dyn_cast<DotOperandEncodingAttr>(targetType.getEncoding());
+  if (dotEnc && dotEnc.getOpIdx() == 0)
     return;
   Value oldV = convertOp->getOperand(0);
   LDBG("check backward remat with source " << oldV << " encoding "
