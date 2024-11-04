@@ -1,8 +1,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/IR/Attributes.h"
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
-#include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "llvm/ADT/STLExtras.h"
@@ -164,7 +163,7 @@ applyLinearLayout(Location loc, RewriterBase &rewriter,
   // Manually constant-fold the layout where possible.
   SmallVector<std::pair<StringAttr, int32_t>> constantIns;
   for (auto [inDimName, idx] : indices) {
-    if (auto constant = dyn_cast<LLVM::ConstantOp>(idx.getDefiningOp())) {
+    if (auto constant = idx.getDefiningOp<LLVM::ConstantOp>()) {
       constantIns.push_back(
           {inDimName, cast<IntegerAttr>(constant.getValue()).getInt()});
     } else {
@@ -184,7 +183,7 @@ applyLinearLayout(Location loc, RewriterBase &rewriter,
   }
 
   for (auto [inDimName, idx] : indices) {
-    if (isa<LLVM::ConstantOp>(idx.getDefiningOp())) {
+    if (idx.getDefiningOp<LLVM::ConstantOp>()) {
       continue;
     }
 
@@ -350,7 +349,7 @@ bool emitTransferBetweenRegistersAndShared(
 
   int numElems = regToSharedLayout.getInDimSize(kRegister);
   auto vecTy = vec_ty(elemLlvmTy, vecElems);
-  auto ptrTy = ptr_ty(ctx, /*addressSpace=*/3);
+  auto ptrTy = shmemBase.getType();
   Value zero = i32_val(0);
   SmallVector<Value> ret;
   for (int i = 0; i < numElems / vecElems; i++) {
@@ -405,7 +404,8 @@ void storeDistributedToShared(MemDescType dstTy, RankedTensorType srcTy,
                               Type elemLlvmTy, ArrayRef<Value> srcVals,
                               Value smemBase, ArrayRef<Value> dstStrides,
                               Location loc, RewriterBase &rewriter,
-                              const TargetInfoBase &target) {
+                              const TargetInfoBase &target,
+                              std::pair<size_t, Type> *const llvmOpCount) {
   bool success = emitTransferBetweenRegistersAndShared(
       srcTy, dstTy, elemLlvmTy, /*maxVecElems=*/std::nullopt, smemBase,
       dstStrides, loc, rewriter, target, [&](VectorType vecTy, Value vecAddr) {
@@ -419,7 +419,12 @@ void storeDistributedToShared(MemDescType dstTy, RankedTensorType srcTy,
         store(vec, vecAddr)
             .setAlignment(vecTy.getNumElements() *
                           elemLlvmTy.getIntOrFloatBitWidth() / 8);
+        if (llvmOpCount) {
+          ++(llvmOpCount->first);
+          llvmOpCount->second = vecTy;
+        }
       });
+
   if (!success)
     llvm::report_fatal_error("Failed to emit transfer from register to shared");
 }
@@ -516,6 +521,24 @@ Value createLLVMIntegerConstant(OpBuilder &builder, Location loc, short width,
   Type ty = builder.getIntegerType(width);
   return builder.create<LLVM::ConstantOp>(loc, ty,
                                           builder.getIntegerAttr(ty, value));
+}
+
+LLVM::CallOp createLLVMCallOp(OpBuilder &builder, Location loc,
+                              LLVMFuncOp funcOp, ValueRange args) {
+  auto op = builder.create<LLVM::CallOp>(loc, funcOp, args);
+  op.getProperties().setOpBundleSizes(builder.getDenseI32ArrayAttr({}));
+  op.getProperties().setOperandSegmentSizes({static_cast<int>(args.size()), 0});
+  return op;
+}
+
+LLVM::CallIntrinsicOp
+createLLVMIntrinsicCallOp(OpBuilder &builder, Location loc, StringRef intrinsic,
+                          TypeRange types, ValueRange args) {
+  auto op = builder.create<LLVM::CallIntrinsicOp>(loc, types, args);
+  op.getProperties().setIntrin(builder.getStringAttr(intrinsic));
+  op.getProperties().setOpBundleSizes(builder.getDenseI32ArrayAttr({}));
+  op.getProperties().setOperandSegmentSizes({static_cast<int>(args.size()), 0});
+  return op;
 }
 
 bool isConstantZero(Value v) {
@@ -814,8 +837,6 @@ SmallVector<Value> getMultiDimOffset(Attribute layout, Location loc,
       emitMfmaOffsetForCTA(mfmaLayout, offsets, 0, multiDimCTAInRepId[0],
                            multiDimCTAInRepId[1]);
     } else if (auto wmmaLayout = dyn_cast<AMDWmmaEncodingAttr>(layout)) {
-      // TODO: support 2nd gen of WMMA
-      assert(wmmaLayout.getVersion() == 1);
       emitWmmaOffsetForCTA(wmmaLayout, offsets, 0, multiDimCTAInRepId[0],
                            multiDimCTAInRepId[1]);
     }
@@ -839,6 +860,33 @@ SmallVector<Value> getWrappedMultiDimOffset(
       multiDimOffsetWrapped[d] = multiDimOffset[d];
   }
   return multiDimOffsetWrapped;
+}
+
+std::pair<Value, Value> convertMxfp4x2ToBf16x2(RewriterBase &rewriter,
+                                               Location loc, Value v) {
+  auto em0 = and_(v, i8_val(0x70));
+  auto em1 = and_(v, i8_val(0x7));
+  Value v0 = or_(shl(zext(i16_ty, em0), i16_val(2)),
+                 shl(zext(i16_ty, and_(v, i8_val(0x80))), i16_val(8)));
+  Value v1 = or_(shl(zext(i16_ty, em1), i16_val(6)),
+                 shl(zext(i16_ty, and_(v, i8_val(0x8))), i16_val(12)));
+
+  // Three cases:
+  // 1) x is normal and non-zero: Correct bias
+  v0 = select(icmp_ne(and_(em0, i8_val(0x60)), i8_val(0)),
+              add(v0, i16_val((127 - 1) << 7)), v0);
+  v1 = select(icmp_ne(and_(em1, i8_val(0x6)), i8_val(0)),
+              add(v1, i16_val((127 - 1) << 7)), v1);
+
+  // 2) x is subnormal (x == 0bs001 where s is the sign): Map to +-0.5 in
+  // bf16
+  v0 = select(icmp_eq(em0, i8_val(0x10)),
+              or_(i16_val(16128), and_(v0, i16_val(0x8000))), v0);
+  v1 = select(icmp_eq(em1, i8_val(0x1)),
+              or_(i16_val(16128), and_(v1, i16_val(0x8000))), v1);
+  // 3) x is zero, nothing to do
+
+  return {v0, v1};
 }
 
 } // namespace LLVM

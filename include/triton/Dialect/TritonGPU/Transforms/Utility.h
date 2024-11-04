@@ -28,8 +28,7 @@ class SharedEncodingAttr;
 // Version = 3: <m, n, k>
 SmallVector<unsigned, 3> mmaVersionToInstrShape(int version,
                                                 const ArrayRef<int64_t> &shape,
-                                                RankedTensorType type,
-                                                int numWarps);
+                                                Type type, int numWarps);
 
 // Return true if the Load uses block pointer.
 bool isLoadFromTensorPtr(triton::LoadOp op);
@@ -134,11 +133,24 @@ scf::ForOp replaceForOpWithNewSignature(
 scf::ForOp replaceForOpWithNewSignature(RewriterBase &rewriter, scf::ForOp loop,
                                         ValueRange newIterOperands);
 
+// Replace WhileOp with a new WhileOp with extra operands. The YieldOp is not
+// updated and needs to be updated separately for the loop to be correct.
+scf::WhileOp replaceWhileOpWithNewSignature(
+    RewriterBase &rewriter, scf::WhileOp loop, ValueRange newIterOperands,
+    TypeRange newResultTypes,
+    SmallVectorImpl<std::tuple<Value, Value>> &replacements);
+scf::WhileOp replaceWhileOpWithNewSignature(RewriterBase &rewriter,
+                                            scf::WhileOp loop,
+                                            ValueRange newIterOperands,
+                                            TypeRange newResultTypes);
+
 // Replace IfOp with a new IfOp with extra results operands. The YieldOp is not
 // updated and needs to be updated separately for the bodies to be correct.
 scf::IfOp replaceIfOpWithNewSignature(
     RewriterBase &rewriter, scf::IfOp loop, TypeRange newResultTypes,
     SmallVectorImpl<std::tuple<Value, Value>> &replacements);
+scf::IfOp replaceIfOpWithNewSignature(RewriterBase &rewriter, scf::IfOp ifOp,
+                                      TypeRange newResultTypes);
 
 // Append the given |newOperands| to the |forOp|'s yield op.
 void appendToForOpYield(scf::ForOp forOp, ArrayRef<Value> newOperands);

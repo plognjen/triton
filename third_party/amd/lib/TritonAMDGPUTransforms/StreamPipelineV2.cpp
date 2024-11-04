@@ -1,6 +1,8 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
+#include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "third_party/amd/lib/TritonAMDGPUToLLVM/SchedInstructions.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -31,25 +33,92 @@ using namespace mlir;
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
+static Operation *streamPredication(RewriterBase &rewriter, Operation *op,
+                                    Value pred) {
+  // The epilogue peeling generates a select for the stage output. This causes
+  // too much register pressure with the loop result and the epilogue-dot in
+  // regs for the select. Conditionally executing the dot will allow the backend
+  // to optimize the select away as redundant.
+  if (auto dotOp = dyn_cast<tt::DotOp>(op)) {
+    auto loc = dotOp->getLoc();
+    auto ifOp = rewriter.create<scf::IfOp>(loc, dotOp.getResult().getType(),
+                                           pred, /*withElseRegion=*/true);
+    auto thenB = ifOp.getThenBodyBuilder();
+    auto yield = thenB.create<scf::YieldOp>(loc, dotOp.getResult());
+    dotOp->moveBefore(yield);
+    ifOp.getElseBodyBuilder().create<scf::YieldOp>(loc, dotOp.getC());
+    return ifOp;
+  } else if (isa<gpu::BarrierOp>(op)) {
+    return op;
+  }
+  return tt::predicateOp(rewriter, op, pred);
+}
+
 namespace {
 
-struct LoadInfo {
-  // Shared layout is used for loads feeding into dot ops.
-  ttg::SharedEncodingAttr sharedEncoding = nullptr;
-  // Blocked encoding is used for loads not used by the dot.
-  ttg::BlockedEncodingAttr blockedEncoding = nullptr;
-  // The distance of this load's stage to its use' stage.
-  int distToUse = 0;
-  bool usedByDot = false;
+// Encapsulate stream pipelining
+// For each `scf.for` create a StreamPipeliner manager.
+class StreamPipeliner {
+public:
+  StreamPipeliner(scf::ForOp _forOp, int _numStages)
+      : forOp(_forOp), schedule(_numStages), numStages(_numStages),
+        axisInfoAnalysis(forOp->getParentOfType<ModuleOp>()) {
+    options.supportDynamicLoops = true;
+    options.peelEpilogue = true;
+    options.predicateFn = streamPredication;
+  }
+
+  void computeLoadOpsToIndirectionLevelAndUse();
+  void assignMemoryLayouts();
+  void scheduleLoads(DenseSet<Operation *> &rootUsers);
+  void scheduleDependencies();
+  void scheduleDistanceOneDependencies();
+  void scheduleRemainingToLastStage(tt::CoarseSchedule::Cluster afterPrologue);
+
+  bool preprocessLoopAndBuildSchedule();
+  bool pipelineLoop();
+
+  Value createAlloc(Operation *loadOp, ttg::SharedEncodingAttr sharedEnc,
+                    unsigned numBuffers);
+  void createStreamCopy(tt::LoadOp loadOp, Value alloc, Value extractIdx,
+                        tt::CoarseSchedule::Cluster prefetchCluster);
+  void createStreamOps();
+
+private:
+  scf::ForOp forOp;
+  tt::CoarseSchedule schedule;
+  int numStages;
+
+  // Mapping and indirection level for each `tt.load` to its use.
+  llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
+      loadOpToIndLevelAndUse;
+
+  struct LoadInfo {
+    // Shared layout is used for loads feeding into dot ops.
+    ttg::SharedEncodingAttr sharedEncoding = nullptr;
+    // The distance of this load's stage to its use' stage.
+    int distToUse = 0;
+    bool usedByDot = false;
+  };
+
+  // Mapping for each pipelined load to scheduling details.
+  llvm::MapVector<Operation *, LoadInfo> loadToInfo;
+
+  // Lookup alignment/contiguity mappings for the current module.
+  tt::ModuleAxisInfoAnalysis axisInfoAnalysis;
+
+  // Capture list of new shared memory buffers.
+  SmallVector<Value> sharedMemAllocs;
+
+  // Pipelining options for the PipelineExpander
+  tt::PipeliningOption options;
 };
 
 } // namespace
 
-static void createStreamCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
-                             Value extractIdx, tt::CoarseSchedule &schedule,
-                             tt::CoarseSchedule::Cluster prefetchCluster,
-                             llvm::MapVector<Operation *, LoadInfo> &loadToInfo,
-                             int numStages) {
+void StreamPipeliner::createStreamCopy(
+    tt::LoadOp loadOp, Value alloc, Value extractIdx,
+    tt::CoarseSchedule::Cluster prefetchCluster) {
   OpBuilder builder(forOp);
   Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
   // Replace the load with insert/extract slice.
@@ -101,7 +170,7 @@ static void createStreamCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
   SmallVector<ttg::LocalAllocOp> allocsToErase;
   for (Operation *user : loadOp->getUsers()) {
     if (auto alloc = dyn_cast<ttg::LocalAllocOp>(user)) {
-      alloc.replaceAllUsesWith(viewLoad.getResult());
+      triton::replaceUsesAndPropagateType(builder, alloc, viewLoad.getResult());
       allocsToErase.push_back(alloc);
     }
   }
@@ -117,6 +186,15 @@ static void createStreamCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
     auto select = builder.create<arith::SelectOp>(
         loc, loadOp.getType(), mask, sharedLoad.getResult(), other);
     result = select->getResults();
+  }
+
+  // If the currently processed `LoadOp` is labeled with an index regarding
+  // to which `DotOp` operand the corresponding data belongs to, then label the
+  // expanded `LocalStoreOp` with the same index. This is required for
+  // instruction scheduling hints to correctly count the emitted `ds_write`
+  // instructions for each GEMM tile.
+  if (auto attr = loadOp->getAttr(triton::amdgpu::OpIdxAttr::getMnemonic())) {
+    storeOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), attr);
   }
 
   loadOp->replaceAllUsesWith(result);
@@ -158,11 +236,23 @@ getSharedEncIfAllUsersAreDotEnc(Value val) {
       auto CTALayout = ttg::getCTALayout(srcTy.getEncoding());
       auto order = ttg::getOrder(srcTy.getEncoding());
       unsigned bitWidth = srcTy.getElementType().getIntOrFloatBitWidth();
+      SmallVector<unsigned> sharedOrder;
+      int rank = order.size();
+      // TODO rework this when shared -> dotOp conversions support arbitrary
+      // shared memory ordering
+      if (rank == 3) {
+        // Move the batch dimension (dim #0) to be the last so that it will be
+        // the slowest varying dimension.
+        for (unsigned i = 0; i < rank; ++i)
+          if (order[i] != 0)
+            sharedOrder.emplace_back(order[i]);
+        sharedOrder.emplace_back(0);
+      } else {
+        sharedOrder = order;
+      }
       tempAttr = ttg::SharedEncodingAttr::get(
-          val.getContext(), dotOpEnc, srcTy.getShape(),
-          ttg::getOrder(srcTy.getEncoding()),
-          ttg::getCTALayout(srcTy.getEncoding()),
-          srcTy.getElementType().getIntOrFloatBitWidth(), /*needTrans=*/false);
+          val.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder, CTALayout,
+          bitWidth, /*needTrans=*/false);
     }
     // Check that the shared encodings needed by the users are compatible.
     if (!tempAttr || (attr != nullptr && attr != tempAttr))
@@ -196,10 +286,7 @@ getBlockedEncoding(tt::LoadOp loadOp, tt::ModuleAxisInfoAnalysis &axisInfo) {
 //
 // Indirection level is "0" for the load op directly used by the dot op,
 // "1" for the load op used by the load op used by the dot op, and so on.
-static llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
-loadOpsToIndirectionLevelAndUse(scf::ForOp forOp) {
-  llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
-      loadOpToIndLevelAndUse;
+void StreamPipeliner::computeLoadOpsToIndirectionLevelAndUse() {
   DenseSet<Operation *> seen;
 
   // Recursively visit the given op and its operands to discover all load ops
@@ -239,18 +326,11 @@ loadOpsToIndirectionLevelAndUse(scf::ForOp forOp) {
         dfs(&op, 0, &op);
     }
   }
-
-  return loadOpToIndLevelAndUse;
 }
 
 // Goes through all load ops to identify those that can be pipelined and assign
 // layout to them.
-static llvm::MapVector<Operation *, LoadInfo>
-assignMemoryLayouts(llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
-                        &loadOpToIndLevelAndUse,
-                    tt::ModuleAxisInfoAnalysis &axisInfoAnalysis) {
-  llvm::MapVector<Operation *, LoadInfo> loadToInfo;
-
+void StreamPipeliner::assignMemoryLayouts() {
   for (auto &[op, dist, use] : loadOpToIndLevelAndUse) {
     if (loadToInfo.count(op))
       // TODO: We'd need to verify that the distance is the same.
@@ -340,20 +420,12 @@ assignMemoryLayouts(llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
 
     loadToInfo[op] = loadInfo;
   }
-
-  return loadToInfo;
 }
 
-static llvm::MapVector<Operation *, LoadInfo>
-scheduleLoads(scf::ForOp forOp, tt::CoarseSchedule &schedule,
-              DenseSet<Operation *> &rootUsers, int numStages) {
-  ModuleOp moduleOp = forOp->getParentOfType<ModuleOp>();
-  tt::ModuleAxisInfoAnalysis axisInfoAnalysis(moduleOp);
-
+void StreamPipeliner::scheduleLoads(DenseSet<Operation *> &rootUsers) {
   // Get all loads that are (transitively) used by dot ops and their distance
   // to the dot op.
-  llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
-      loadOpToIndLevelAndUse = loadOpsToIndirectionLevelAndUse(forOp);
+  computeLoadOpsToIndirectionLevelAndUse();
   LLVM_DEBUG({
     LDBG("Found " << loadOpToIndLevelAndUse.size() << " loads to pipeline:");
     for (const auto &[l, i, u] : loadOpToIndLevelAndUse) {
@@ -363,13 +435,12 @@ scheduleLoads(scf::ForOp forOp, tt::CoarseSchedule &schedule,
     }
   });
   if (loadOpToIndLevelAndUse.empty())
-    return {};
+    return;
 
   // Check which loads are good for pipelining, and assign them memory layouts.
-  llvm::MapVector<Operation *, LoadInfo> loadToInfo =
-      assignMemoryLayouts(loadOpToIndLevelAndUse, axisInfoAnalysis);
+  assignMemoryLayouts();
   if (loadToInfo.empty())
-    return {};
+    return;
 
   // Filter out load ops that cannot be pipelined.
   int resize = 0;
@@ -427,13 +498,11 @@ scheduleLoads(scf::ForOp forOp, tt::CoarseSchedule &schedule,
       LDBG("    usedByDot: " << info.usedByDot);
     }
   });
-  return loadToInfo;
 }
 
 // Add dependencies of anchor ops to the coarse schedule. Schedule them to
 // the same stage and ordering cluster as the anchor op.
-static void scheduleDependencies(scf::ForOp forOp, tt::CoarseSchedule &schedule,
-                                 int numStages) {
+void StreamPipeliner::scheduleDependencies() {
   SmallVector<std::tuple<Operation *, int, tt::CoarseSchedule::Cluster>>
       opsInOrder = schedule.getOpsInOrder(forOp);
   // Schedule dependencies stage by stage.
@@ -448,9 +517,7 @@ static void scheduleDependencies(scf::ForOp forOp, tt::CoarseSchedule &schedule,
 
 // Find dependencies with distance of 1. They will go to the next stage,
 // but in the cluster before the current op.
-static void scheduleDistanceOneDependencies(scf::ForOp forOp,
-                                            tt::CoarseSchedule &schedule,
-                                            int numStages) {
+void StreamPipeliner::scheduleDistanceOneDependencies() {
   auto getNestedOperands = [](Operation *op) {
     SmallVector<Value> operands;
     op->walk([&](Operation *nestedOp) {
@@ -497,10 +564,8 @@ static void scheduleDistanceOneDependencies(scf::ForOp forOp,
   }
 }
 
-static void
-scheduleRemainingToLastStage(scf::ForOp forOp, tt::CoarseSchedule &schedule,
-                             tt::CoarseSchedule::Cluster afterPrologue,
-                             int numStages) {
+void StreamPipeliner::scheduleRemainingToLastStage(
+    tt::CoarseSchedule::Cluster afterPrologue) {
   // Assign the rest of the ops to the last stage.
   // Take care of the ordering of the ops - uses cannot be scheduled to the
   // cluster before the definition.
@@ -537,14 +602,15 @@ scheduleRemainingToLastStage(scf::ForOp forOp, tt::CoarseSchedule &schedule,
 }
 
 // Create an allocation that can hold distance number of loadOp shapes.
-static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
-                         ttg::SharedEncodingAttr sharedEnc, unsigned distance) {
+Value StreamPipeliner::createAlloc(Operation *loadOp,
+                                   ttg::SharedEncodingAttr sharedEnc,
+                                   unsigned numBuffers) {
   OpBuilder builder(forOp);
   Attribute sharedMemorySpace =
       triton::gpu::SharedMemorySpaceAttr::get(forOp.getContext());
   auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
   SmallVector<int64_t> bufferShape(ty.getShape().begin(), ty.getShape().end());
-  bufferShape.insert(bufferShape.begin(), distance);
+  bufferShape.insert(bufferShape.begin(), numBuffers);
   Type memdescType = tt::MemDescType::get(bufferShape, ty.getElementType(),
                                           sharedEnc, sharedMemorySpace,
                                           /*mutableMemory=*/true);
@@ -554,10 +620,7 @@ static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
 
 // Convert load ops into shared memory allocation loads and apply
 // multi-buffering based on the required number of buffers.
-static SmallVector<Value>
-createStreamOps(scf::ForOp &forOp, tt::CoarseSchedule &schedule,
-                llvm::MapVector<Operation *, LoadInfo> &loadToInfo,
-                int numStages) {
+void StreamPipeliner::createStreamOps() {
   // Calculate the number of buffers needed for each load.
   // TODO: Use the precise number of buffers needed by the particular load.
   int numBuffers = -1;
@@ -565,15 +628,14 @@ createStreamOps(scf::ForOp &forOp, tt::CoarseSchedule &schedule,
     numBuffers = std::max(numBuffers, info.distToUse);
   LDBG("deduced shared memory buffer number = " << numBuffers);
 
-  SmallVector<Value> allocs;
   SmallVector<std::pair<Operation *, Value>> loadToAllocs;
   for (auto &[loadOp, info] : loadToInfo) {
     if (!info.sharedEncoding)
       continue;
 
-    Value alloc = createAlloc(forOp, loadOp, info.sharedEncoding, numBuffers);
+    Value alloc = createAlloc(loadOp, info.sharedEncoding, numBuffers);
     assert(alloc && "Failed to create alloc for the async load.");
-    allocs.push_back(alloc);
+    sharedMemAllocs.push_back(alloc);
     loadToAllocs.emplace_back(loadOp, alloc);
   }
 
@@ -610,78 +672,69 @@ createStreamOps(scf::ForOp &forOp, tt::CoarseSchedule &schedule,
 
   for (auto &[op, alloc] : loadToAllocs) {
     if (auto loadOp = dyn_cast<tt::LoadOp>(op))
-      createStreamCopy(forOp, loadOp, alloc, extractIdx, schedule,
-                       prefetchCluster, loadToInfo, numStages);
+      createStreamCopy(loadOp, alloc, extractIdx, prefetchCluster);
   }
   // Patch the yield with the updated counters.
   appendToForOpYield(forOp, {extractIdx});
-
-  return allocs;
 }
 
-static bool preprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
-                                           tt::PipeliningOption &options) {
+bool StreamPipeliner::preprocessLoopAndBuildSchedule() {
   // Schedule the loads and root ops (dot ops) in the loop. This will give us
   // a scaffold for the final schedule.
   DenseSet<Operation *> rootUsers;
-  tt::CoarseSchedule coarseSchedule(numStages);
-  llvm::MapVector<Operation *, LoadInfo> loadToInfo =
-      scheduleLoads(forOp, coarseSchedule, rootUsers, numStages);
+  scheduleLoads(rootUsers);
   if (loadToInfo.empty())
     return false;
 
   LLVM_DEBUG({
     LDBG("Coarse schedule loads only:");
-    coarseSchedule.dump();
+    schedule.dump();
   });
 
   // Convert the loads into shared memory allocations and loads from them.
-  SmallVector<Value> allocs =
-      createStreamOps(forOp, coarseSchedule, loadToInfo, numStages);
+  createStreamOps();
 
   LLVM_DEBUG({
     LDBG("Coarse schedule with stream loads:");
-    coarseSchedule.dump();
+    schedule.dump();
   });
 
-  tt::CoarseSchedule::Cluster afterPrologue = coarseSchedule.clusters.begin();
+  tt::CoarseSchedule::Cluster afterPrologue = schedule.clusters.begin();
 
-  scheduleDependencies(forOp, coarseSchedule, numStages);
+  scheduleDependencies();
   LLVM_DEBUG({
     LDBG("Coarse schedule with dependencies:");
-    coarseSchedule.dump();
+    schedule.dump();
   });
 
-  scheduleDistanceOneDependencies(forOp, coarseSchedule, numStages);
+  scheduleDistanceOneDependencies();
   LLVM_DEBUG({
     LDBG("Coarse schedule with dist 1:");
-    coarseSchedule.dump();
+    schedule.dump();
   });
 
-  scheduleRemainingToLastStage(forOp, coarseSchedule, afterPrologue, numStages);
+  scheduleRemainingToLastStage(afterPrologue);
   LLVM_DEBUG({
     LDBG("Final coarse schedule:");
-    coarseSchedule.dump();
+    schedule.dump();
   });
 
   // Create the final schedule for the kernel loop. This will dictate the
   // stages and order of operations to the pipeline expander.
-  std::vector<std::pair<Operation *, unsigned>> schedule =
-      coarseSchedule.createFinalSchedule(forOp);
+  std::vector<std::pair<Operation *, unsigned>> coarseSchedule =
+      schedule.createFinalSchedule(forOp);
 
   // Fill out the pipeline options.
   options.getScheduleFn =
-      [schedule](scf::ForOp, std::vector<std::pair<Operation *, unsigned>> &s) {
-        s = std::move(schedule);
+      [coarseSchedule](scf::ForOp,
+                       std::vector<std::pair<Operation *, unsigned>> &s) {
+        s = std::move(coarseSchedule);
       };
-  options.peelEpilogue = true;
-  options.predicateFn = tt::predicateOp;
-  options.supportDynamicLoops = true;
 
   OpBuilder builder(forOp);
   builder.setInsertionPointAfter(forOp);
   // Explicitly deallocate created allocations.
-  for (auto alloc : allocs)
+  for (auto alloc : sharedMemAllocs)
     builder.create<ttg::LocalDeallocOp>(forOp.getLoc(), alloc);
   return true;
 }
@@ -703,12 +756,11 @@ static bool checkPrecondition(scf::ForOp forOp) {
   return !forOp->walk(hasNestedLoopInside).wasInterrupted();
 }
 
-static bool pipelineLoop(scf::ForOp forOp, int numStages) {
+bool StreamPipeliner::pipelineLoop() {
   if (!checkPrecondition(forOp))
     return false;
 
-  tt::PipeliningOption options;
-  if (!preprocessLoopAndBuildSchedule(forOp, numStages, options))
+  if (!preprocessLoopAndBuildSchedule())
     return false;
   LDBG("Loop before sending to expander:\n" << *forOp);
 
@@ -718,6 +770,41 @@ static bool pipelineLoop(scf::ForOp forOp, int numStages) {
 }
 
 namespace {
+// Go through a single use chain to get the result of the target op after all
+// unary ops - e.g., `convert_layout`, `fp_to_fp`, etc.
+template <typename TargetOpType> Operation *passPrevUnaryOps(Value value) {
+  auto getNextUnaryOps = [](Value value) -> Operation * {
+    if (auto defOp = value.getDefiningOp()) {
+      if ((defOp->getNumOperands() == 1) || llvm::dyn_cast<TargetOpType>(defOp))
+        return defOp;
+    }
+    return nullptr;
+  };
+
+  auto unaryOp = getNextUnaryOps(value);
+  while (unaryOp) {
+    if (llvm::dyn_cast<TargetOpType>(unaryOp))
+      return unaryOp;
+    unaryOp = getNextUnaryOps(unaryOp->getOperand(0));
+  }
+  return nullptr;
+}
+
+// Annotate each `tt.LoadOp` instruction with its corresponding gemm operand
+// index. Note, this is a part of the instruction scheduling routine. Currently,
+// we support `forOp`s which contain only a single `tt.DotOp` in the bodies.
+void labelLoadOpsForTritonDot(scf::ForOp forOp) {
+  mlir::MLIRContext *ctx = forOp->getContext();
+  if (auto dotOp = triton::getSingleDotOpIfExists(forOp)) {
+    for (auto [opIdx, dotOperand] : llvm::enumerate(dotOp->getOperands())) {
+      if (auto loadOp = passPrevUnaryOps<triton::LoadOp>(dotOperand)) {
+        auto opIdxAttr = triton::amdgpu::OpIdxAttr::get(ctx, opIdx);
+        loadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), opIdxAttr);
+      }
+    }
+  }
+}
+
 struct PipelinePass : public TritonAMDGPUStreamPipelineV2Base<PipelinePass> {
   PipelinePass() = default;
   PipelinePass(int32_t numStages) { this->numStages = numStages; }
@@ -725,13 +812,16 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineV2Base<PipelinePass> {
   void runOnOperation() override {
     SmallVector<scf::ForOp> loops;
     getOperation()->walk([&](scf::ForOp forOp) {
+      labelLoadOpsForTritonDot(forOp);
       // Bail out for loops with num_stage <= 1.
       if (getNumStagesOrDefault(forOp) > 1)
         loops.push_back(forOp);
     });
 
-    for (scf::ForOp forOp : loops)
-      pipelineLoop(forOp, getNumStagesOrDefault(forOp));
+    for (scf::ForOp forOp : loops) {
+      StreamPipeliner sp(forOp, getNumStagesOrDefault(forOp));
+      sp.pipelineLoop();
+    }
   }
 
 private:

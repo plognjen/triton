@@ -1,7 +1,7 @@
 import importlib.util
 import itertools
 import shutil
-import tempfile
+import pathlib
 
 import pytest
 import torch
@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.runtime.jit import JITFunction
+from triton._internal_testing import is_hip
 
 
 @triton.jit
@@ -128,17 +129,15 @@ def test_combine_fn_change():
         seen_keys.add(key)
 
 
-def write_and_load_module(code, num_extra_lines):
-    with tempfile.NamedTemporaryFile(mode='w+', suffix='.py') as f:
-        f.write(('# extra line\n' * num_extra_lines) + code)
-        f.flush()
-        spec = importlib.util.spec_from_file_location("module.name", f.name)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+def write_and_load_module(temp_file: pathlib.Path, code, num_extra_lines):
+    temp_file.write_text(('# extra line\n' * num_extra_lines) + code)
+    spec = importlib.util.spec_from_file_location("module.name", str(temp_file))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
-def test_changed_line_numbers_invalidate_cache():
+def test_changed_line_numbers_invalidate_cache(tmp_path: pathlib.Path):
     from textwrap import dedent
     code = dedent("""
         import triton
@@ -146,10 +145,12 @@ def test_changed_line_numbers_invalidate_cache():
         def test_kernel(i):
             i = i + 1
     """)
-    orig_mod = write_and_load_module(code, 0)
+    temp_file0 = tmp_path / "test_changed_line_numbers_invalidate_cache0.py"
+    orig_mod = write_and_load_module(temp_file0, code, 0)
     orig_cache_key = orig_mod.test_kernel.cache_key
 
-    updated_mod = write_and_load_module(code, 1)
+    temp_file1 = tmp_path / "test_changed_line_numbers_invalidate_cache1.py"
+    updated_mod = write_and_load_module(temp_file1, code, 1)
     updated_cache_key = updated_mod.test_kernel.cache_key
     assert orig_cache_key != updated_cache_key
 
@@ -193,7 +194,7 @@ def test_annotation(device):
 
     x = torch.empty(1, dtype=torch.int32, device=device)
 
-    device = torch.cuda.current_device()
+    device = getattr(torch, device).current_device()
     kernel[(1, )](x, 1)
     kernel[(1, )](x, 8)
     kernel[(1, )](x, 16)
@@ -221,7 +222,7 @@ def test_kernel_default_arg(device):
     kernel[(1, )](x)
     assert x == torch.ones_like(x)
 
-    device = torch.cuda.current_device()
+    device = getattr(torch, device).current_device()
     assert len(kernel.cache[device]) == 1
 
 
@@ -414,7 +415,7 @@ def test_jit_warmup_cache(device) -> None:
         torch.randn(32, dtype=torch.float32, device=device),
         32,
     ]
-    device = torch.cuda.current_device()
+    device = getattr(torch, device).current_device()
     assert len(kernel_add.cache[device]) == 0
     kernel_add.warmup(torch.float32, torch.float32, torch.float32, 32, grid=(1, ))
     assert len(kernel_add.cache[device]) == 1
@@ -424,26 +425,21 @@ def test_jit_warmup_cache(device) -> None:
     assert len(kernel_add.cache[device]) == 1
 
 
-def test_jit_debug() -> None:
+def test_jit_debug(device) -> None:
 
     @triton.jit
-    def kernel_add(a, b, o, N: tl.constexpr):
-        idx = tl.arange(0, N)
-        tl.device_assert(idx < 32, "idx < 32")
-        tl.store(o + idx, tl.load(a + idx) + tl.load(b + idx))
+    def kernel(tmp):
+        tl.device_assert(tl.load(tmp) == 1, "tmp == 1")
 
-    device = torch.cuda.current_device()
-    assert len(kernel_add.cache[device]) == 0
-    kernel_add.warmup(torch.float32, torch.float32, torch.float32, 32, grid=(1, ))
-    assert len(kernel_add.cache[device]) == 1
-    kernel_add.debug = False
-    kernel_add.warmup(torch.float32, torch.float32, torch.float32, 32, grid=(1, ))
-    assert len(kernel_add.cache[device]) == 2
-    kernel_add.debug = True
-    kernel_add.warmup(torch.float32, torch.float32, torch.float32, 32, grid=(1, ))
-    assert len(kernel_add.cache[device]) == 3
-    bins = list(kernel_add.cache[device].values())
-    assert bins[2].asm['ttir'] != bins[1].asm['ttir']
+    device = getattr(torch, device).current_device()
+    tmp = torch.tensor([1], dtype=torch.int32, device=device)
+    assert len(kernel.cache[device]) == 0
+    kernel[(1, )](tmp, debug=False)
+    assert len(kernel.cache[device]) == 1
+    kernel[(1, )](tmp, debug=True)
+    assert len(kernel.cache[device]) == 2
+    bins = list(kernel.cache[device].values())
+    assert bins[0].asm['ttir'] != bins[1].asm['ttir']
 
 
 @triton.jit
@@ -452,13 +448,13 @@ def add_fn(a, b, o, N: tl.constexpr):
     tl.store(o + idx, tl.load(a + idx) + tl.load(b + idx))
 
 
-def test_jit_noinline() -> None:
+def test_jit_noinline(device) -> None:
 
     @triton.jit
     def kernel_add_device(a, b, o, N: tl.constexpr):
         add_fn(a, b, o, N)
 
-    device = torch.cuda.current_device()
+    device = getattr(torch, device).current_device()
     assert len(kernel_add_device.cache[device]) == 0
     kernel_add_device.warmup(torch.float32, torch.float32, torch.float32, 32, grid=(1, ))
     assert len(kernel_add_device.cache[device]) == 1
@@ -488,7 +484,7 @@ def test_memory_leak() -> None:
         tl.store(out_ptr0 + (x0 + tl.zeros([XBLOCK], tl.int32)), tmp0, xmask)
 
 
-def test_preload(fresh_triton_cache) -> None:
+def test_preload(device, fresh_triton_cache) -> None:
 
     @triton.jit
     def kernel_add(a, b, o, N: tl.constexpr, type: tl.constexpr):
@@ -502,7 +498,7 @@ def test_preload(fresh_triton_cache) -> None:
         tl.device_assert(idx < 32, "idx < 32")
         tl.store(o + idx, tl.load(a + idx) - tl.load(b + idx))
 
-    device = torch.cuda.current_device()
+    device = getattr(torch, device).current_device()
 
     # get the serialized specialization data
     specialization_data = None
@@ -542,3 +538,64 @@ def test_preload(fresh_triton_cache) -> None:
     # test that we can't preload a mismatched kernel
     with pytest.raises(RuntimeError, match="Specialization data is for"):
         kernel_sub.preload(specialization_data)
+
+
+def test_hooks(device, fresh_triton_cache) -> None:
+
+    @triton.jit
+    def kernel_add(a, b, o, N: tl.constexpr, type: tl.constexpr):
+        idx = tl.arange(0, N)
+        tl.device_assert(idx < 32, "idx < 32")
+        tl.store(o + idx, tl.load(a + idx) + tl.load(b + idx))
+
+    # get the serialized specialization data
+    specialization_data = None
+    is_warmup = False
+    key = 0
+
+    def cache_hook(*args, **kwargs):
+        nonlocal specialization_data
+        specialization_data = kwargs["compile"]["specialization_data"]
+        nonlocal is_warmup
+        is_warmup = kwargs["compile"]["is_warmup"]
+        nonlocal key
+        key = kwargs["compile"]["key"]
+
+    specialization_data_compiled = None
+
+    def compiled_hook(*args, **kwargs):
+        nonlocal specialization_data_compiled
+        specialization_data_compiled = kwargs["compile"]["specialization_data"]
+
+    JITFunction.cache_hook = cache_hook
+    JITFunction.compiled_hook = compiled_hook
+    kernel_add.warmup(torch.float32, torch.float32, torch.float32, 32, tl.float32, grid=(1, ))
+    assert specialization_data is not None and specialization_data_compiled == specialization_data
+    assert is_warmup is True
+    assert key in kernel_add.cache[getattr(torch, device).current_device()]
+
+
+@pytest.mark.skipif(reason="within_2g is a HIP specific optimization", condition=not is_hip())
+def test_within_2gb(device, fresh_triton_cache) -> None:
+
+    @triton.jit
+    def kernel_add(a):
+        tl.load(a)
+
+    # This is the attribute we want to test
+    pointer_range_32 = None
+
+    def cache_hook(*args, **kwargs):
+        nonlocal pointer_range_32
+        pointer_range_32 = kwargs["compile"]["configs"][0].pointer_range_32
+
+    JITFunction.cache_hook = cache_hook
+    # In warmup we assume that the pointer range is 32 bits
+    kernel_add.warmup(torch.float32, grid=(1, ))
+    assert pointer_range_32 == [0]
+    # Torch tensor > 2GB
+    kernel_add[(1, 0)](torch.empty(2**31, dtype=torch.int8, device=device))
+    assert len(pointer_range_32) == 0
+    # Torch tensor <= 2GB
+    kernel_add[(1, 0)](torch.empty(2**31 - 1, dtype=torch.int8, device=device))
+    assert pointer_range_32 == [0]

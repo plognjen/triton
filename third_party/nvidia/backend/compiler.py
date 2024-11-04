@@ -1,9 +1,11 @@
 from triton.backends.compiler import BaseBackend, GPUTarget
 from triton._C.libtriton import ir, passes, llvm, nvidia
+from triton.runtime.errors import PTXASError
 
 from dataclasses import dataclass
 import functools
-from typing import Any, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional
+from types import ModuleType
 import hashlib
 import re
 import tempfile
@@ -48,20 +50,28 @@ def ptx_get_version(cuda_version) -> int:
     assert isinstance(cuda_version, str)
     major, minor = map(int, cuda_version.split('.'))
     if major == 12:
-        return 80 + minor
+        if minor < 6:
+            return 80 + minor
+        elif minor == 6:
+            return 85
     if major == 11:
         return 70 + minor
     if major == 10:
         return 63 + minor
-    raise RuntimeError("Triton only support CUDA 10.0 or higher")
+    raise RuntimeError("Triton only support CUDA 10.0 or higher, but got CUDA version: " + cuda_version)
 
 
-@functools.lru_cache()
-def get_features(options):
+def get_ptx_version_from_options(options):
     ptx_version = options.ptx_version
     if ptx_version is None:
         _, cuda_version = _path_to_binary("ptxas")
         ptx_version = ptx_get_version(cuda_version)
+    return ptx_version
+
+
+@functools.lru_cache()
+def get_features(options):
+    ptx_version = get_ptx_version_from_options(options)
 
     # PTX 8.3 is the max version supported by llvm 3a83162168.
     #
@@ -90,14 +100,15 @@ class CUDAOptions:
     cluster_dims: tuple = (1, 1, 1)
     ptx_version: int = None
     enable_fp_fusion: bool = True
-    allow_fp8e4nv: bool = False
-    allow_fp8e4b15: bool = False
+    supported_fp8_dtypes: Tuple[str] = ("fp8e5", "fp8e4b15")
+    deprecated_fp8_dtypes: Tuple[str] = ()
     default_dot_input_precision: str = "tf32"
     allowed_dot_input_precisions: Tuple[str] = ("tf32", "tf32x3", "ieee")
     max_num_imprecise_acc_default: bool = None
     extern_libs: dict = None
     debug: bool = False
     backend_name: str = 'cuda'
+    sanitize_overflow: bool = True
 
     def __post_init__(self):
         default_libdir = Path(__file__).parent / 'lib'
@@ -129,9 +140,17 @@ class CUDABackend(BaseBackend):
 
     def parse_options(self, opts) -> Any:
         args = {k: opts[k] for k in CUDAOptions.__dataclass_fields__.keys() if k in opts}
-        args["allow_fp8e4nv"] = self.capability >= 89
-        args["allow_fp8e4b15"] = self.capability < 90
-        if not "enable_fp_fusion" in args:
+        if "supported_fp8_dtypes" not in args:
+            supported_fp8_dtypes = set(CUDAOptions.supported_fp8_dtypes)
+            if self.capability >= 89:
+                supported_fp8_dtypes.add("fp8e4nv")
+            args["supported_fp8_dtypes"] = tuple(sorted(supported_fp8_dtypes))
+
+        if "deprecated_fp8_dtypes" not in args:
+            if self.capability >= 90:
+                args["deprecated_fp8_dtypes"] = ("fp8e4b15", )
+
+        if "enable_fp_fusion" not in args:
             args["enable_fp_fusion"] = os.getenv("TRITON_DEFAULT_FP_FUSION", "1") == "1"
         args["max_num_imprecise_acc_default"] = 2**30 if self.capability == 90 else 0
         return CUDAOptions(**args)
@@ -155,6 +174,10 @@ class CUDABackend(BaseBackend):
         }
         return codegen_fns
 
+    def get_module_map(self) -> Dict[str, ModuleType]:
+        from triton.language.extra.cuda import libdevice
+        return {"triton.language.extra.libdevice": libdevice}
+
     def load_dialects(self, ctx):
         nvidia.load_dialects(ctx)
 
@@ -170,6 +193,7 @@ class CUDABackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_licm(pm)
         passes.common.add_symbol_dce(pm)
+        passes.ttir.add_loop_unroll(pm)
         pm.run(mod)
         return mod
 
@@ -202,6 +226,7 @@ class CUDABackend(BaseBackend):
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
         passes.common.add_cse(pm)
         if capability // 10 >= 8:
+            passes.ttgpuir.add_optimize_accumulator_init(pm)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
             passes.ttgpuir.add_pipeline(pm, opt.num_stages)
         passes.ttgpuir.add_prefetch(pm)
@@ -221,6 +246,8 @@ class CUDABackend(BaseBackend):
 
     @staticmethod
     def make_llir(src, metadata, options, capability):
+        ptx_version = get_ptx_version_from_options(options)
+
         # warp-specialization mutates num_warps
         num_warp_groups = src.get_int_attr("triton_gpu.num-warp-groups-per-cta")
         if num_warp_groups is not None:
@@ -229,12 +256,17 @@ class CUDABackend(BaseBackend):
         # TritonGPU -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
+        # Set up Diagnostic
+        if os.environ.get("MLIR_ENABLE_REMARK", "0") == "1":
+            srcMgr = llvm.source_mgr()
+            diag = ir.source_mgr_diag(srcMgr, mod.context)
+            mod.context.printOpOnDiagnostic(True)
         nvidia.passes.ttgpuir.add_decompose_unsupported_conversions(pm)
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
         passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)
         passes.ttgpuir.add_allocate_shared_memory(pm)
-        nvidia.passes.ttgpuir.add_to_llvmir(pm, capability)
+        nvidia.passes.ttgpuir.add_to_llvmir(pm, capability, ptx_version)
         nvidia.passes.ttnvgpuir.add_nvgpu_to_llvm(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
@@ -275,10 +307,7 @@ class CUDABackend(BaseBackend):
 
     @staticmethod
     def make_ptx(src, metadata, opt, capability):
-        ptx_version = opt.ptx_version
-        if ptx_version is None:
-            _, cuda_version = _path_to_binary("ptxas")
-            ptx_version = ptx_get_version(cuda_version)
+        ptx_version = get_ptx_version_from_options(opt)
 
         triple = 'nvptx64-nvidia-cuda'
         proc = 'sm_90a' if capability == 90 else f'sm_{capability}'
@@ -333,9 +362,9 @@ class CUDABackend(BaseBackend):
                 else:
                     error = f'`ptxas` failed with error code {e.returncode}'
 
-                raise RuntimeError(f'{error}\n'
-                                   f'`ptxas` stderr:\n{log}\n'
-                                   f'Repro command: {ptxas_cmd}\n')
+                raise PTXASError(f"{error}\n"
+                                 f"`ptxas` stderr:\n{log}\n"
+                                 f'Repro command: {" ".join(ptxas_cmd)}\n')
 
             with open(fbin, 'rb') as f:
                 cubin = f.read()
