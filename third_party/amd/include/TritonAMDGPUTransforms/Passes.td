@@ -70,6 +70,8 @@ def TritonAMDGPUBypassLDSForDotLayout: Pass<"tritonamdgpu-bypass-lds-for-dot-lay
 
   let dependentDialects = [];
 
+}
+
 def TritonAMDGPUCanonicalizePointers : Pass<"tritonamdgpu-canonicalize-pointers", "mlir::ModuleOp"> {
   let summary = "Canonicalize pointers: rewrite pointers passed to load/store operation as a `<basePtr, offset>` pair.";
 

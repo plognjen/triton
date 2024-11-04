@@ -614,21 +614,15 @@ LogicalResult LoopPipelinerInternal::createKernel(
     // If there is a live range spanning across more than 2 stages we need to
     // add extra arg.
     for (unsigned i = 1; i < numVersionReturned; i++) {
-      // @@@ RegionIterArgs?
-      auto yieldOpr = newForOp.getBody()->getArguments()[yieldOperands.size() + 1 +
-                                             newForOp.getNumInductionVars()];
       setValueMapping(it.first, newForOp->getResult(yieldOperands.size()),
-                      version);
-      setValueMapping(yieldOpr, it.first, version);
-      ++version;
-      yieldOperands.push_back(yieldOpr);
+                      version++);
+      yieldOperands.push_back(
+          newForOp.getBody()->getArguments()[yieldOperands.size() + 1 +
+                                             newForOp.getNumInductionVars()]);
     }
     setValueMapping(it.first, newForOp->getResult(yieldOperands.size()),
-                    version);
-    // Map new yield param to old for reverse lookup
-    auto yieldOpr = mapping.lookupOrDefault(it.first);
-    setValueMapping(yieldOpr, it.first, version + 1);
-    yieldOperands.push_back(yieldOpr);
+                    version++);
+    yieldOperands.push_back(mapping.lookupOrDefault(it.first));
   }
   // Map the yield operand to the forOp returned value.
   for (const auto &retVal :
@@ -710,7 +704,6 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
 
   // Emit `maxStage - 1` epilogue part that includes operations from stages
   // [i; maxStage].
-  llvm::SmallVector<int64_t> yieldVersions(returnValues.size(), 0);
   for (int64_t i = 1; i <= maxStage; i++) {
     SmallVector<std::pair<Value, unsigned>> returnMap(returnValues.size());
     for (Operation *op : opOrder) {
@@ -775,22 +768,6 @@ LoopPipelinerInternal::emitEpilogue(RewriterBase &rewriter,
         }
       }
     }
-    if (0 && dynamicLoop) {
-      // scf.yield rvals;
-      rewriter.create<scf::YieldOp>(loc, returnValues);
-      for (int ri = 0; ri < returnValues.size(); ++ri) {
-        auto ifVal = guardIfOp.getResult(ri);
-        returnValues[ri] = ifVal;
-        // 
-        if (oldReturnValues[ri])
-          setValueMapping(oldReturnValues[ri], ifVal, i+1);
-        // Reset for args
-        if (ri < forArgs.size())
-          setValueMapping(forArgs[ri], ifVal, i+1);
-        else
-          setValueMapping(newForArgs[ri], ifVal, i+1);
-      }
-    }
   }
   return success();
 }
@@ -804,11 +781,7 @@ void LoopPipelinerInternal::setValueMapping(Value key, Value el, int64_t idx) {
         valueMapping
             .insert(std::make_pair(key, llvm::SmallVector<Value>(maxStage + 1)))
             .first;
-  auto &arr = it->second;
-  if (arr.size() == idx)
-    arr.push_back(el);
-  else
-    arr[idx] = el;
+  it->second[idx] = el;
 }
 
 } // namespace
@@ -850,7 +823,8 @@ mlir::triton::pipelineForLoop(RewriterBase &rewriter, ForOp forOp,
                                     rewriter)))
     return failure();
 
-  llvm::SmallVector<Value> returnValues = newForOp.getResults();
+  llvm::SmallVector<Value> returnValues =
+      newForOp.getResults().take_front(forOp->getNumResults());
   if (options.peelEpilogue) {
     // 4. Emit the epilogue after the new forOp.
     rewriter.setInsertionPointAfter(newForOp);
@@ -858,10 +832,9 @@ mlir::triton::pipelineForLoop(RewriterBase &rewriter, ForOp forOp,
       return failure();
   }
   // 5. Erase the original loop and replace the uses with the epilogue output.
-  if (forOp->getNumResults() > 0) {
-    returnValues.pop_back_n(newForOp.getResults().size() - forOp.getResults().size());
+  if (forOp->getNumResults() > 0)
     rewriter.replaceOp(forOp, returnValues);
-  } else
+  else
     rewriter.eraseOp(forOp);
 
   return newForOp;

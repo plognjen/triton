@@ -3095,9 +3095,9 @@ def convert_fp8_to_fp32(x, device, dtype_str):
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
     "M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack",
-    [(*shape, 8, False, True, epilogue, input_precision, in_dtype, out_dtype, 2)
-     for shape in [(32, 128, 128)]
-     for epilogue in ['none']
+    [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1)
+     for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
+     for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
      for input_precision in ['tf32', 'tf32x3', 'ieee']
      for in_dtype, out_dtype in [('float16', 'float16'), ('float16', 'float32'), ('float32', 'float32')]
      if not (input_precision != 'ieee' and (in_dtype in ['float16']))] +
@@ -3237,7 +3237,7 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         'COL_A': col_a, 'COL_B': col_b, 'BLOCK_M': M, 'BLOCK_K': K, 'BLOCK_N': N, 'ADD_MATRIX':
         epilogue == 'add-matrix', 'ADD_ROWS': epilogue == 'add-rows', 'ADD_COLS': epilogue == 'add-cols', 'DO_SOFTMAX':
         epilogue == 'softmax', 'CHAIN_DOT': epilogue == 'chain-dot', 'INPUT_PRECISION': input_precision, 'num_warps':
-        num_warps, 'num_ctas': num_ctas, 'out_dtype': out_dtype, 'matrix_instr_nonkdim': 16
+        num_warps, 'num_ctas': num_ctas, 'out_dtype': out_dtype
     }
 
     if is_hip():
