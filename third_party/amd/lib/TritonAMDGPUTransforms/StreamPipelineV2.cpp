@@ -326,10 +326,37 @@ void StreamPipeliner::assignMemoryLayouts() {
     }
 
     if (use->hasTrait<OpTrait::DotLike>()) {
-      // Only use shared memory when feeding into a dot op.
-      loadInfo.usedByDot = true;
-      loadInfo.sharedEncoding =
-          getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
+      RankedTensorType oprTy;
+      DenseSet<Value> seen;
+      std::function<bool(Value, Value)> findLoad = [&](Value loadOp,
+                                                       Value opr) -> bool {
+        if (loadOp == opr)
+          return true;
+        // Skip previously visited load ops.
+        if (seen.contains(opr))
+          return false;
+        seen.insert(opr);
+
+        if (Operation *op = opr.getDefiningOp()) {
+          for (Value operand : op->getOperands()) {
+            if (findLoad(loadOp, operand))
+              return true;
+          }
+        }
+        return false;
+      };
+      for (Value opr : use->getOperands()) {
+        if (findLoad(loadOp.getResult(), opr)) {
+          oprTy = dyn_cast<RankedTensorType>(opr.getType());
+          break;
+        }
+      }
+      if (cvtNeedsSharedMemory(tensorTy, oprTy)) {
+        // Only use shared memory when feeding into a dot op.
+        loadInfo.usedByDot = true;
+        loadInfo.sharedEncoding =
+            getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
+      }
     } else if (auto useOp = dyn_cast<tt::LoadOp>(use)) {
       // The use of this loadOp is another loadOp. If the use is not in the
       // loadToInfo already, it means that the use is not valid for pipelining
