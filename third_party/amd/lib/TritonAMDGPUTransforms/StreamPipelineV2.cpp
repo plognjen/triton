@@ -326,6 +326,8 @@ void StreamPipeliner::assignMemoryLayouts() {
     }
 
     if (use->hasTrait<OpTrait::DotLike>()) {
+      // Heuristic to avoid pipelining loads which result could be used directly
+      // as dot operand
       RankedTensorType oprTy;
       DenseSet<Value> seen;
       std::function<bool(Value, Value)> findLoad = [&](Value loadOp,
@@ -338,6 +340,12 @@ void StreamPipeliner::assignMemoryLayouts() {
         seen.insert(opr);
 
         if (Operation *op = opr.getDefiningOp()) {
+          // skip processing if operand already goes through shared memory
+          // or layout conversion through shared memory inevitable
+          if (!isa<triton::gpu::ConvertLayoutOp>(op) &&
+              !op->hasTrait<OpTrait::SameOperandsAndResultEncoding>() &&
+              !op->hasTrait<OpTrait::Elementwise>())
+            return false;
           for (Value operand : op->getOperands()) {
             if (findLoad(loadOp, operand))
               return true;
@@ -351,7 +359,9 @@ void StreamPipeliner::assignMemoryLayouts() {
           break;
         }
       }
-      if (cvtNeedsSharedMemory(tensorTy, oprTy)) {
+      bool foundLDSBypass = oprTy && tensorTy.getShape() == oprTy.getShape() &&
+                            !cvtNeedsSharedMemory(tensorTy, oprTy);
+      if (!foundLDSBypass) {
         // Only use shared memory when feeding into a dot op.
         loadInfo.usedByDot = true;
         loadInfo.sharedEncoding =
