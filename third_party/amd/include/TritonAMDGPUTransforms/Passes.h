@@ -14,6 +14,8 @@ createTritonAMDGPUAccelerateMatmulPass(std::string archGenName = std::string(),
                                        int matrixInstructionSize = 0,
                                        int kpack = 1);
 
+std::unique_ptr<Pass> createTritonAMDGPUEnableMoeLDSBypassPass();
+
 std::unique_ptr<Pass> createTritonAMDGPUCanonicalizeLoopsPass();
 
 std::unique_ptr<Pass> createTritonAMDGPUReorderInstructionsPass();

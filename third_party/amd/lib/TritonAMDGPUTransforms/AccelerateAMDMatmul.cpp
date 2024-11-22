@@ -114,7 +114,11 @@ FailureOr<MfmaInsn> chooseMfmaInstruction(RankedTensorType cType,
 
   unsigned mDim = 0;
   unsigned nDim = 0;
-  if (enforcedNonKDim != 0) {
+  if (triton::isMoeLDSBypass()) {
+    mDim = nDim = 16;
+    assert((enforcedNonKDim == 0 || enforcedNonKDim == 16) &&
+           "moe lds bypass optimization supports only mfma 16x16");
+  } else if (enforcedNonKDim != 0) {
     mDim = nDim = enforcedNonKDim;
   } else {
     int minSize = std::min(M, N);

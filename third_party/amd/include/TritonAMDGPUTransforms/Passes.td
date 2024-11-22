@@ -47,6 +47,18 @@ def TritonAMDGPUAccelerateMatmul : Pass<"tritonamdgpu-accelerate-matmul", "mlir:
   ];
 }
 
+def TritonAMDGPUEnableMoeLDSBypass : Pass<"tritonamdgpu-enable-moe-lds-bypass", "mlir::ModuleOp"> {
+  let summary = "enable moe lds bypass flag";
+
+  let description = [{
+    calls enableMoeLDSBypass(true) for testing needs
+  }];
+
+  let constructor = "mlir::createTritonAMDGPUEnableMoeLDSBypassPass()";
+
+  let dependentDialects = [];
+}
+
 def TritonAMDGPUOptimizeEpilogue : Pass<"tritonamdgpu-optimize-epilogue", "mlir::ModuleOp"> {
   let summary = "Optimize epilogue: (1) Store accumulators directly without going thorough SMEM in epilogue.";
 
