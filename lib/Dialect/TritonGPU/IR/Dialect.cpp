@@ -2434,6 +2434,7 @@ SmallVector<unsigned> DotOperandEncodingAttr::getThreadsPerWarp() const {
       std::swap(threadsPerWarp[rank - 2], threadsPerWarp[rank - 1]);
     return threadsPerWarp;
   }
+  return {4, 16};
   llvm::report_fatal_error(
       "getThreadsPerWarp not implemented for DotOperandEncodingAttr");
 }
