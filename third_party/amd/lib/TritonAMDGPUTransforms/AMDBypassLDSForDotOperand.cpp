@@ -160,9 +160,7 @@ struct TritonAMDGPUBypassLDSForDotOperandPass
     // srcBlocked.getOrder[0] == 0 is the requirement for opIdx 1 tensor to be K
     // contig (required condition 1) from the above doc).
     auto mfmaLayout = dyn_cast<ttg::AMDMfmaEncodingAttr>(dstDotOp.getParent());
-    return mfmaLayout &&
-           (dstDotOp.getKWidth() == 8 || dstDotOp.getKWidth() == 16) &&
-           mfmaLayout.getWarpsPerCTA()[0] == 1 && dstDotOp.getOpIdx() == 1 &&
+    return mfmaLayout && dstDotOp.getOpIdx() == 1 &&
            srcBlocked.getOrder()[0] == 0;
   }
 };

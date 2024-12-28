@@ -233,7 +233,7 @@ class HIPBackend(BaseBackend):
         bypass_lds = os.environ.get("TRITON_HIP_BYPASS_LDS_FOR_DOT", "0") == "1"
 
         # if bypass_lds:
-        amd.passes.ttgpuir.add_bypass_lds_for_dot_operand(pm)
+        # amd.passes.ttgpuir.add_bypass_lds_for_dot_operand(pm)
 
         # The `local-prefetch` scheduling variant requires turning on buffer ops.
         if options.instruction_sched_variant == "local-prefetch":
@@ -254,7 +254,7 @@ class HIPBackend(BaseBackend):
         if amd.has_matrix_core_feature(options.arch):
             amd.passes.ttgpuir.add_reorder_instructions(pm)
 
-        if use_buffer_ops:
+        if True:
             amd.passes.ttgpuir.add_canonicalize_pointers(pm)
             passes.common.add_canonicalizer(pm)
             amd.passes.ttgpuir.add_convert_to_buffer_ops(pm)
