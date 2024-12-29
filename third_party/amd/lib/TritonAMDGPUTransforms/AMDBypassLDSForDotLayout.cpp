@@ -248,8 +248,8 @@ public:
       assert(elemBitWidth == 8 && "8 bit dtype should use BLOCK_K=256");
       newSizePerThread[0] = targetLoadBitWidth / elemBitWidth;
       newSizePerThread[1] = 1;
-      newThreadsPerWarp[0] = 16;
-      newThreadsPerWarp[1] = 4;
+      newThreadsPerWarp[0] = 4;
+      newThreadsPerWarp[1] = 16;
       newWarpsPerCTA[0] = 1;
       newWarpsPerCTA[1] = numWarps;
       newOrder[0] = 0;
@@ -269,7 +269,15 @@ public:
     case 64:
     case 32:
     case 16:
-      assert(false && "BLOCK_K must be 128 for fp16 and 256 for int8/fp8");
+      newSizePerThread[0] = targetLoadBitWidth / elemBitWidth;
+      newSizePerThread[1] = 1;
+      newThreadsPerWarp[0] = 8;
+      newThreadsPerWarp[1] = 8;
+      newWarpsPerCTA[0] = 1;
+      newWarpsPerCTA[1] = numWarps;
+      newOrder[0] = 0;
+      newOrder[1] = 1;
+      break;
     default:
       return failure();
     }
