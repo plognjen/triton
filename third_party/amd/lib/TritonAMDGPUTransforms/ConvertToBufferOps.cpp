@@ -140,8 +140,8 @@ bool canUseBufferOps(Value ptr, const DenseSet<Value> &assumptions) {
   LDBG("32 bit offset");
 
   // 3. Check if the offset is non-negative
-  if (!verifyNonNegativeExpr(offset, assumptions))
-    return false;
+  // if (!verifyNonNegativeExpr(offset, assumptions))
+  //   return false;
 
   LDBG("Non-negative");
   return true;

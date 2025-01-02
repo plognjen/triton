@@ -233,7 +233,7 @@ class HIPBackend(BaseBackend):
         bypass_lds = os.environ.get("TRITON_HIP_BYPASS_LDS_FOR_DOT", "0") == "1"
 
         # if bypass_lds:
-        # amd.passes.ttgpuir.add_bypass_lds_for_dot_operand(pm)
+        amd.passes.ttgpuir.add_bypass_lds_for_dot_operand(pm)
 
         # The `local-prefetch` scheduling variant requires turning on buffer ops.
         if options.instruction_sched_variant == "local-prefetch":
@@ -361,6 +361,13 @@ class HIPBackend(BaseBackend):
         metadata["name"] = names[0]
         # llvm -> hsaco
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', [], options.enable_fp_fusion, False)
+        if "AMD_INSERT_AMDGCN" in os.environ.keys():
+            insert_module_path = str(os.environ["AMD_INSERT_AMDGCN"])
+            if not os.path.exists(insert_module_path):
+                raise RuntimeError(f'cannot find amdgcn file to insert. Given: `{insert_module_path}`')
+            with open(insert_module_path, "r") as file:
+                file_content = file.readlines()
+            amdgcn = ''.join(file_content)
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
