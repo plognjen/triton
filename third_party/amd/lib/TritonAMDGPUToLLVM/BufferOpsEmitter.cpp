@@ -64,7 +64,7 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr) {
     uint32_t oob = 3;
     flags |= (oob << 28);
   }
-  Value stride = int_val(16, 24576);
+  Value stride = int_val(16, 17408);
   Value flagsConst = int_val(32, flags);
   Type rsrcType = LLVM::LLVMPointerType::get(rewriter.getContext(), 8);
   Value numRecordsByte = int_val(32, std::numeric_limits<int>::max() - 1);
