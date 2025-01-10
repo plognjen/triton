@@ -186,7 +186,7 @@ class HIPBackend(BaseBackend):
 
     @staticmethod
     def make_ttir(mod, metadata, options):
-        mod.context.enable_moe_lds_bypass(False)
+        mod.context.enable_moe_lds_bypass(True)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.common.add_inliner(pm)
@@ -218,7 +218,7 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
 
         # if options.enable_moe_lds_bypass:
-        # amd.passes.ttgpuir.add_tritongpu_bypass_lds_for_dot_layout_pass(pm)
+        amd.passes.ttgpuir.add_tritongpu_bypass_lds_for_dot_layout_pass(pm)
 
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         if amd.has_matrix_core_feature(options.arch):
