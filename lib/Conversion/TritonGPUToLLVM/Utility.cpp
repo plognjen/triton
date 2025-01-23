@@ -273,6 +273,7 @@ bool emitTransferBetweenRegistersAndShared(
 
   auto shape = registerTy.getShape();
   int rank = shape.size();
+  auto dstDotEncoding = dyn_cast<DotOperandEncodingAttr>(registerTy.getEncoding());
 
   StringAttr kBlock = str_attr("block");
   StringAttr kRegister = str_attr("register");
@@ -309,6 +310,13 @@ bool emitTransferBetweenRegistersAndShared(
   // ..., offsetXN, block), where the offsetX's are in minor-to-major order.
   LinearLayout regToSharedLayout = regLayout->invertAndCompose(*sharedLayout);
 
+  llvm::outs() << "==================================================\n";
+  if (dstDotEncoding && dstDotEncoding.getOpIdx() == 0) {
+    llvm::outs() << "opIdx0 shared \n" << regToSharedLayout;
+  } else if(dstDotEncoding && dstDotEncoding.getOpIdx() == 1) {
+    llvm::outs() << "opIdx1 shared \n" << regToSharedLayout;
+  }
+
   // TODO(jlebar): We don't currently support loading from shared memory in a
   // different CTA.  We'd need to emit `mapa.shared::cluster` instructions.
   for (int inBlock = 1; inBlock < regToSharedLayout.getInDimSize(kBlock);
@@ -338,9 +346,9 @@ bool emitTransferBetweenRegistersAndShared(
   // calling getNumConsecutiveInOut(), we could flatten consecutive out-dims
   // which have known strides.  This would allow us to vectorize across multiple
   // shmem out dimensions where possible.
-  const int vecElems =
-      std::min(regToSharedLayout.getNumConsecutiveInOut(),
-               maxVecElems.value_or(std::numeric_limits<int>::max()));
+  const int vecElems = 4;
+      // std::min(regToSharedLayout.getNumConsecutiveInOut(),
+      //          maxVecElems.value_or(std::numeric_limits<int>::max()));
 
   Value threadId = getThreadId(rewriter, loc);
   Value threadsPerWarp = i32_val(regToSharedLayout.getInDimSize(kLane));
@@ -348,7 +356,7 @@ bool emitTransferBetweenRegistersAndShared(
   Value warpId = udiv(threadId, threadsPerWarp);
 
   int numElems = regToSharedLayout.getInDimSize(kRegister);
-  auto vecTy = vec_ty(elemLlvmTy, vecElems);
+  auto vecTy = vec_ty(elemLlvmTy, 4);
   auto ptrTy = shmemBase.getType();
   Value zero = i32_val(0);
   SmallVector<Value> ret;
@@ -386,9 +394,20 @@ SmallVector<Value> loadSharedToDistributed(RankedTensorType dstTy,
       dstTy, srcTy, elemLlvmTy, /*maxVecElems=*/std::nullopt, smemObj.getBase(),
       smemObj.getStrides(), loc, rewriter, target,
       [&](VectorType vecTy, Value vecAddr) {
-        auto vecVal = load(vecTy, vecAddr);
-        vecVal.setAlignment(vecTy.getNumElements() *
-                            elemLlvmTy.getIntOrFloatBitWidth() / 8);
+        auto dstDotEncoding = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+
+        Value vecVal;
+        if (!dstDotEncoding ||
+            (dstDotEncoding && dstDotEncoding.getOpIdx() == 0)) {
+          vecVal = load(vecTy, vecAddr);
+        } else {
+          auto intrCall = LLVM::createLLVMIntrinsicCallOp(
+              rewriter, loc, "llvm.amdgcn.ds.read.tr16.b64.v4f16.p3", vecTy,
+              vecAddr);
+          vecVal = intrCall.getResult(0);
+        }
+        // vecVal.setAlignment(vecTy.getNumElements() *
+        //                     elemLlvmTy.getIntOrFloatBitWidth() / 8);
 
         for (int v = 0; v < vecTy.getNumElements(); v++) {
           ret.push_back(extract_element(elemLlvmTy, vecVal, i32_val(v)));

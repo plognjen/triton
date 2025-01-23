@@ -698,8 +698,7 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy) {
   // subsumed by the linear-layout checks.
   // TODO(Keren): We didn't check `cvtNeedsWarpShuffle` here because it's not
   // supported yet in Triton's backend.
-  return !cvtReordersRegisters(srcTy, dstTy) &&
-         !isBlockedToDotShortcut(srcTy, dstTy) &&
+  return !isBlockedToDotShortcut(srcTy, dstTy) &&
          !isMmaToDotShortcut(srcTy, dstTy) &&
          !isMfmaToDotShortcut(srcTy, dstTy);
 }

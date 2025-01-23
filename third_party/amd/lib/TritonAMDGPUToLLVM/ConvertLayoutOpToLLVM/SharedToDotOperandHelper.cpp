@@ -161,9 +161,66 @@ llvm::SmallVector<Value> computeOffsetsAType(
       inblockOffset[i] =
           computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
     }
+    llvm::outs() << "numBlocks: " << numBlocks << " nonKDim " << nonKDim << " warpsPerBlock " << warpsPerBlock << "\n";
     for (int block = 0; block < numBlocks; ++block) {
       int blockNonKOffset = block * nonKDim * warpsPerBlock;
       Value offAdjust = mul(i32_val(blockNonKOffset), strides[rank - 2]);
+      for (int i = 0; i < blockSize; ++i)
+        aOffsets[block * blockSize + i] = add(offAdjust, inblockOffset[i]);
+    }
+  }
+  return aOffsets;
+}
+
+llvm::SmallVector<Value> computeOffsetsATypeTranspose(
+    ConversionPatternRewriter &rewriter, Location loc,
+    computeTensorElemMappingInBlockT fn, const ArrayRef<int64_t> &elemsPerInstr,
+    Value warpId, Value laneId, int warpsPerBlock, int numOfElems,
+    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
+    SharedEncodingAttr srcLayout, unsigned nonKDim, unsigned kDim) {
+  SmallVector<Value> strides = smemObj.getStrides();
+  SmallVector<Value> offsets = smemObj.getOffsets();
+  auto rank = offsets.size();
+
+  int vectorSize = 1;
+  if (srcLayout.getOrder()[0] == rank - 1) {
+    if (isSwizzled(srcLayout))
+      vectorSize = std::min(static_cast<int>(srcLayout.getVec()), numOfElems);
+    else
+      vectorSize = numOfElems;
+  }
+
+  auto mapping = fn(rewriter, loc, elemsPerInstr, warpId, laneId, numOfElems,
+                    reps, offsets, vectorSize, nonKDim, kDim);
+  const auto numBlocks = reps[reps.size() - 2];
+  const auto blockSize = mapping.size();
+  auto order = srcLayout.getOrder();
+  llvm::SmallVector<Value> aOffsets(blockSize * numBlocks);
+
+  if (!isSwizzlePatternFitsIntoBlock(srcLayout, 0, reps, elemsPerInstr,
+                                     warpsPerBlock)) {
+    for (int block = 0; block < numBlocks; ++block) {
+      int blockNonKOffset = block * nonKDim * warpsPerBlock;
+      for (int i = 0; i < blockSize; ++i) {
+        Value row = add(mapping[i][0], i32_val(blockNonKOffset));
+        Value col = mapping[i][1];
+        aOffsets[block * blockSize + i] =
+            computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+      }
+    }
+  } else {
+    // compute inblock offsets once and reuse them for all blocks
+    llvm::SmallVector<Value> inblockOffset(mapping.size());
+    for (int i = 0; i < mapping.size(); ++i) {
+      Value row = mapping[i][0];
+      Value col = mapping[i][1];
+      inblockOffset[i] =
+          computeOffset(rewriter, loc, row, col, smemObj, srcLayout);
+    }
+    llvm::outs() << "numBlocks: " << numBlocks << " nonKDim " << nonKDim << " warpsPerBlock " << warpsPerBlock << "\n";
+    for (int block = 0; block < numBlocks; ++block) {
+      int blockNonKOffset = block * nonKDim * warpsPerBlock;
+      Value offAdjust = mul(i32_val(blockNonKOffset), strides[rank - 1]);
       for (int i = 0; i < blockSize; ++i)
         aOffsets[block * blockSize + i] = add(offAdjust, inblockOffset[i]);
     }

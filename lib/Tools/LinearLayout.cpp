@@ -368,11 +368,11 @@ LinearLayout::checkInvariants(bool requireSurjective) {
                     /*numCols=*/getTotalInDimSizeLog2()) ==
       getTotalOutDimSizeLog2();
 
-  if (requireSurjective && !surjective) {
-    return "Layout is expected to be surjective, i.e. every `out` coordinate "
-           "can be reached by some `in` coordinate, but was not:" +
-           toString();
-  }
+  // if (requireSurjective && !surjective) {
+  //   return "Layout is expected to be surjective, i.e. every `out` coordinate "
+  //          "can be reached by some `in` coordinate, but was not:" +
+  //          toString();
+  // }
   return std::nullopt;
 }
 

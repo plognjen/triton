@@ -302,7 +302,7 @@ compared to 1*64 when the hasLeadingOffset is false.
             if (mfmaEnc.getMDim() == 4)
               maxPhase = 4;
 
-            return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
+            return get(context, 1, 1, 1, order, CTALayout);
           } else {
             // Do not swizzle in case k dimension is not innermost.
             // In this case accesses will go in different banks even without swizzling.

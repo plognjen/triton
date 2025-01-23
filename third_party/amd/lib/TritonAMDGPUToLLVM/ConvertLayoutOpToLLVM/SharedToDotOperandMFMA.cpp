@@ -122,6 +122,48 @@ llvm::SmallVector<llvm::SmallVector<Value>> computeTensorElemMappingInBlock(
   return mapping;
 }
 
+llvm::SmallVector<llvm::SmallVector<Value>> computeTensorElemMappingInBlockTransposed(
+    ConversionPatternRewriter &rewriter, Location loc,
+    const ArrayRef<int64_t> &elemsPerInstr, Value warpId, Value laneId,
+    int numOfElems, ArrayRef<int64_t> reps, ArrayRef<Value> smemOffsets,
+    int loadVecSize, unsigned iNonKDim, unsigned iKDim) {
+  auto numM = reps[1];
+  auto numK = reps[2];
+  const int loadsPerThread = numOfElems / loadVecSize;
+  llvm::SmallVector<llvm::SmallVector<Value>> mapping(numK * loadsPerThread);
+
+  Value _0 = i32_val(0);
+  Value _32 = i32_val(32);
+  Value _4 = i32_val(4);
+  Value nonKDim = i32_val(iNonKDim);
+  Value warpHOffset = mul(warpId, i32_val(16));
+
+  auto rank = smemOffsets.size();
+  llvm::outs() << "aaaa" << elemsPerInstr[0] << " " <<  elemsPerInstr[1] << " " << loadVecSize << " " << numOfElems << " " << numM << " " << numK << " " <<  loadsPerThread << "\n";
+  for (int tile = 0; tile < numK; ++tile) {
+    Value tileVOffset = i32_val(tile * 16); 
+    Value tileHOffset = _0;
+
+    Value laneVOffset = udiv(laneId, _4);
+    Value laneHOffset;
+    laneHOffset = mul(urem(laneId, _4), i32_val(numOfElems));
+
+    for (int loadId = 0; loadId < loadsPerThread; ++loadId) {
+      Value elemVOffset = _0;
+      Value elemHOffset = i32_val(loadId * loadVecSize);
+
+      Value sliceVOffset =
+          add(add(tileVOffset, laneVOffset), elemVOffset);
+      Value sliceHOffset = add(add(add(tileHOffset, laneHOffset), elemHOffset), warpHOffset);
+
+      Value row = add(sliceVOffset, smemOffsets[rank - 2]);
+      Value col = add(sliceHOffset, smemOffsets[rank - 1]);
+      mapping[loadsPerThread * tile + loadId] = {row, col};
+    }
+  }
+  return mapping;
+}
+
 bool hasSwizzleEnabled(const SharedEncodingAttr &srcEncoding) {
   return srcEncoding.getMaxPhase() > 1;
 }
@@ -230,7 +272,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
     mfmaInstrNonK = elemsPerInstr[nonKDimIdx];
     mfmaInstrK = elemsPerInstr[kDimIdx];
   }
-
+  return Value();
   if (mfmaInstrNonK > shape[nonKDimIdx] || mfmaInstrK > shape[kDimIdx]) {
     // This pattern does not support cases tensor shape is smaller than
     // one instruction size, it will be processed by LinearLayout converter
@@ -238,8 +280,17 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   }
 
   auto numReps = mfmaLayout.getRepForOperand(shape, kWidth, opIdx);
+  if(opIdx == 1){
+    auto tmp = numReps[1];
+    numReps[1] = numReps[2];
+    numReps[2] = tmp;
+  }
   auto numRepNonK = numReps[nonKDimIdx];
   auto numRepK = numReps[kDimIdx];
+  if(opIdx == 1){
+    llvm::outs() << "nnnn " << numRepNonK << " " << numRepK << "\n";
+  }
+
   auto repB = numReps[0];
   // TODO(Lixun): make it simpler
   // getRepForOperand always returns a 3D vector
@@ -287,11 +338,11 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
     Value cSwizzleOffset = smemObj.getCSwizzleOffset(order[0]);
     if (opIdx == 0) {
       if (isColMajor(order)) {
-        SmallVector<int64_t> elemsPerInstr{mfmaInstrK, mfmaInstrNonK};
-        SmallVector<int64_t> reps{numReps[0], numReps[2], numReps[1]};
-        offsets = fastPathComputeOffsets(rewriter, loc, elemsPerInstr,
-                                         spatialWarpId, lane, warpsPerBlockNonK,
-                                         numOfElems, reps, cSwizzleOffset);
+        offsets = AMD::computeOffsetsAType(
+            rewriter, loc, computeTensorElemMappingInBlockTransposed,
+            elemsPerInstr, spatialWarpId, lane, warpsPerBlockNonK, numOfElems,
+            numReps, smemObj, sharedLayout, mDim, mfmaInstrK);
+
       } else {
         llvm_unreachable(
             "row major operand A should be handled in the normal path");
@@ -301,9 +352,11 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
         llvm_unreachable(
             "col major operand B should be handled in the normal path");
       } else {
-        offsets = fastPathComputeOffsets(rewriter, loc, elemsPerInstr,
-                                         spatialWarpId, lane, warpsPerBlockNonK,
-                                         numOfElems, numReps, cSwizzleOffset);
+        assert(opIdx == 1);
+        offsets = AMD::computeOffsetsATypeTranspose(
+            rewriter, loc, computeTensorElemMappingInBlockTransposed,
+            elemsPerInstr, spatialWarpId, lane, warpsPerBlockNonK, numOfElems,
+            numReps, smemObj, sharedLayout, nDim, mfmaInstrK);
       }
     }
     smemBase = smemObj.getBaseBeforeSlice(order[0], loc, rewriter);
@@ -352,7 +405,15 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
                                k * loadsPerThread + loadId];
           loadOffset = add(loadOffset, batchOffset);
           Value loadAddress = gep(smemPtrTy, elemTy, smemBase, loadOffset);
-          Value loadedValue = load(loadVecTy, loadAddress);
+          Value loadedValue;
+          if (opIdx == 1) {
+            auto intrCall = LLVM::createLLVMIntrinsicCallOp(
+                rewriter, loc, "llvm.amdgcn.ds.read.tr16.b64.v4f16.p3",
+                loadVecTy, loadAddress);
+            loadedValue = intrCall.getResult(0);
+          } else {
+            loadedValue = load(loadVecTy, loadAddress);
+          }
           for (int elemId = 0; elemId < elemsPerLoad; ++elemId) {
             Value elemVal =
                 extract_element(elemTy, loadedValue, i32_val(elemId));
