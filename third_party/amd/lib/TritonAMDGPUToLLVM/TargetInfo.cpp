@@ -99,6 +99,15 @@ bool TargetInfo::canUseStMatrix(RankedTensorType tensorTy,
   return false;
 }
 
+bool TargetInfo::canUseLDSTransLoad(int bitwidth) const {
+  if (arch == "gfx950") {
+    bool bitwidthSupported =
+        bitwidth == 16 || bitwidth == 8 || bitwidth == 4 || bitwidth == 6;
+    return bitwidthSupported;
+  }
+  return false;
+}
+
 void TargetInfo::storeMatrixShared(RewriterBase &rewriter, Location loc,
                                    Value ptr, Value val) const {
   llvm::report_fatal_error("AMDGPU does not support stmatrix");

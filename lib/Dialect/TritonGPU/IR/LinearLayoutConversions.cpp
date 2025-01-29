@@ -374,6 +374,99 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
 }
 
+LinearLayout chooseDotLDSTransLayout(DotOperandEncodingAttr dotMfmaLayout,
+                                     ArrayRef<int64_t> shape,
+                                     int32_t elemBitWidth) {
+  auto mfmaLayout = llvm::cast<AMDMfmaEncodingAttr>(dotMfmaLayout.getParent());
+  // Currently, there's no way to determine from the MFMA encoding whether it
+  // will be lowered to mfma16x16x16 or mfma16x16x32 (mfma16x16x32 is not yet
+  // supported). We will likely need to add a field in the MFMA layout to
+  // specify the K dimension.
+  //
+  // For now, mDim == 16 and nDim == 16 implies that
+  // the mfma16x16x16 instruction will be used. Currently, transpose loads are
+  // only supported for mfma16x16x16. Support for other gfx950 MFMA instructions
+  // will be added once they are introduced in the compiler.
+  assert(mfmaLayout.getMDim() == 16 && mfmaLayout.getNDim() == 16);
+  assert(elemBitWidth == 16);
+
+  auto rank = shape.size();
+  bool hasBatchDim = rank == 3;
+  int mIndex = 0 + hasBatchDim;
+
+  // Note that kWidth set in dotOperand layout will be ignored. LDS transpose
+  // instructions can only handle kpack=1 widths.
+  int32_t kWidth = 64 / elemBitWidth;
+  auto kDim = dotMfmaLayout.getOpIdx() == 0 ? rank - 1 : rank - 2;
+
+  int32_t kSize = shape[kDim];
+  auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+
+  MLIRContext *ctx = dotMfmaLayout.getContext();
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  // register order
+  // operand A: [1, 0] / [2, 1, 0]
+  // operand B: [0, 1] / [1, 2, 0]
+  // Regular dot mfma order for both cases is [k, nonk]/[k, nonk, batch]
+  // For LDS transpose layout swap order to [nonk, k]/[nonk, k, batch]
+  SmallVector<unsigned> order = triton::gpu::getOrder(dotMfmaLayout);
+  std::swap(order[0], order[1]);
+  // warp order
+  // common for both operand A and B: [0, 1] / [0, 1, 2]
+  // in both cases it is [M dim, N dim]/[batch, M dim, N dim]
+  SmallVector<unsigned> warpOrder = triton::gpu::getWarpOrder(dotMfmaLayout);
+
+  // Lane holds kWidth consecutive elements along non-k dimension (this is
+  // transposed case, in regular dot case it holds kWidth elements along k dim),
+  // so base register vectors for one tile are initialized in following way: {1,
+  // 0}, {2, 0} ... {kWidth/2, 0}
+  std::vector<std::vector<int32_t>> registerBase;
+  for (int32_t elem = 1; elem < kWidth; elem *= 2)
+    registerBase.emplace_back(std::vector<int32_t>{elem, 0});
+
+  std::vector<std::vector<int32_t>> laneBase;
+  // For transpose LDS loads, each thread reads 8 bytes (4 fp16 elements)
+  // along the non-k dimension. Within a wave, lanes are organized into
+  // 4x4 blocks (16b case), with 4 blocks per wave. This 4x4 block of lanes
+  // is non-k contiguous, meaning non-k is the fastest-changing
+  // dimension. As a result, the first 2 base vectors map along the non-k
+  // dimension (where the k index is 0), while the remaining 4 vectors map
+  // along the k dimension (where the non-k index is 0).
+  laneBase = {{kWidth, 0}, {2 * kWidth, 0}, {0, 1}, {0, 2}, {0, 4}, {0, 8}};
+  int32_t kTileSize = 16;
+
+  // Add repeats of registers along non-K dimension to register base vectors
+  for (int32_t elem = kTileSize; elem < kSize; elem *= 2)
+    registerBase.emplace_back(std::vector<int32_t>{0, elem});
+
+  // Base vectors above are defined in a fixed order [non-k-dim, k-dim].
+  // To assign them to actual matrix dimensions `order` array is used.
+  // For operand A: non-k-dim -> dim0, k-dim -> dim1
+  // For operand B: non-k-dim -> dim1, k-dim -> dim0
+  LinearLayout tileLayout({{kRegister, registerBase}, {kLane, laneBase}},
+                          {outDimNames[order[0]], outDimNames[order[1]]});
+
+  if (hasBatchDim) {
+    assert(order[2] == 0);
+    // Extend the base vector with one value to accommodate for the batch
+    // dimension, which appears at the last.
+    tileLayout *= LinearLayout::identity1D(1, kRegister, outDimNames[order[2]]);
+    tileLayout *= LinearLayout::identity1D(1, kLane, outDimNames[order[2]]);
+  }
+
+  LinearLayout warpLayout = identityStandardND(kWarp, warpsPerCTA, warpOrder);
+
+  LinearLayout ctaLayout = tileLayout.transposeOuts(outDimNames) *
+                           warpLayout.transposeOuts(outDimNames);
+
+  return combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape);
+}
+
 LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
                                    ArrayRef<int64_t> shape) {
 
@@ -1203,6 +1296,12 @@ LinearLayout chooseLdMatrixLayout(Attribute enc, ArrayRef<int64_t> shape,
                                   bool needTrans, int32_t elemBitWidth) {
   auto dot = cast<DotOperandEncodingAttr>(enc);
   return chooseDotLdMatrixLayout(dot, shape, needTrans, elemBitWidth);
+}
+
+LinearLayout chooseLDSTransLayout(Attribute enc, ArrayRef<int64_t> shape,
+                                  int32_t elemBitWidth) {
+  auto dot = cast<DotOperandEncodingAttr>(enc);
+  return chooseDotLDSTransLayout(dot, shape, elemBitWidth);
 }
 
 } // namespace mlir::triton::gpu
