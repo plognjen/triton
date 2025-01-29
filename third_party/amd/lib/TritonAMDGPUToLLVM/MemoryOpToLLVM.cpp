@@ -107,10 +107,9 @@ private:
         [&](VectorType vecTy, Value vecAddr) {
           // TODO(plognjen): support bitwidth 8
           assert(bitwidth == 16);
-          auto intrCall = LLVM::createLLVMIntrinsicCallOp(
-              rewriter, loc, "llvm.amdgcn.ds.read.tr16.b64.v4f16.p3", vecTy,
-              vecAddr);
-          Value vecVal = intrCall.getResult(0);
+          auto dsReadOp =
+              rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
+          Value vecVal = dsReadOp.getResult();
           for (int v = 0; v < vecTy.getNumElements(); v++) {
             outVals.push_back(
                 b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
