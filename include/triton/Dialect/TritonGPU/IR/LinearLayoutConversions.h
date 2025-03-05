@@ -275,6 +275,11 @@ chooseScaledMfmaOperandLayout(AMDMfmaEncodingAttr mfmaEnc, int kWidth,
                               int dotOperandIdx, ScaleDotElemType elemType,
                               llvm::ArrayRef<int64_t> dotOperandShape);
 
+                              LinearLayout
+chooseScaledMfmaOperandLayout2(AMDMfmaEncodingAttr mfmaEnc, int kWidth,
+                              int dotOperandIdx,
+                              llvm::ArrayRef<int64_t> dotOperandShape);
+
 LinearLayout getScaleTMEMStoreLinearLayout(RankedTensorType scaleType,
                                            int numWarps);
 

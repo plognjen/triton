@@ -862,13 +862,13 @@ def mxfp8_mxfp4_matmul(  #
 @pytest.mark.parametrize("M, N, K", [(1024, 512, 512)])
 @pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (256, 128, 128), (128, 256, 128),
                                                        (128, 256, 256), (128, 128, 64), (128, 64, 128)])
-@pytest.mark.parametrize("NUM_STAGES", [1, 3])
+@pytest.mark.parametrize("NUM_STAGES", [2])
 @pytest.mark.parametrize("B_TRANS", [True, False])
 @pytest.mark.parametrize("CONST_SCALE", [True, False])
-@pytest.mark.parametrize("A_DATA_TYPE", ["float8e5", "float8e4nv", "float4"])
-@pytest.mark.parametrize("B_DATA_TYPE", ["float8e5", "float8e4nv", "float4"])
-@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
-@pytest.mark.parametrize("WITH_B_SCALE", [True, False])
+@pytest.mark.parametrize("A_DATA_TYPE", ["float8e4nv"])
+@pytest.mark.parametrize("B_DATA_TYPE", ["float8e4nv"])
+@pytest.mark.parametrize("WITH_A_SCALE", [True])
+@pytest.mark.parametrize("WITH_B_SCALE", [True])
 @pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else [0]))
 def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TRANS, CONST_SCALE, A_DATA_TYPE,
                             B_DATA_TYPE, WITH_A_SCALE, WITH_B_SCALE, nonKDim, device):

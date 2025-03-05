@@ -1291,6 +1291,51 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
   let extraClassDeclaration = extraDistributedDeclaration;
 }
 
+def DotScaledOperandEncodingAttr : DistributedEncoding<"DotScaledOperandEncoding", "dot_scaled_operand_encoding"> {
+  let mnemonic = "dot_scaled_op";
+
+  let description = [{
+In the TritonGPU dialect, given `d = tt.dot a, b, c` tt.dot's operands a and b
+must be of DotOperandEncodingAttr layout, if the dot is MMA v1 or v2 (i.e.
+pre-Hopper).  For MMA v3, the operands are *almost always* in a regular shared
+encoding, but sometimes the LHS is also a dot-operand encoding.
+
+a's opIdx is 0, b's opIdx is 1.
+
+The parent field is the layout of d.
+
+kWidth defines number of consecutive elements stored by one thread along k dimension.
+Some layouts do not use this parameter, either because they have a fixed number of
+elements along the K dim, or they use all elements of the tensor along the K dim.
+
+  }];
+
+  let parameters = (
+    ins
+    "unsigned":$opIdx,
+    "Attribute":$parent,
+    DefaultValuedParameter<"unsigned", "0">:$kWidth
+  );
+
+  let builders = [
+    AttrBuilder<(ins "unsigned":$opIdx,
+                     "Attribute":$parent,
+                     "Type":$eltTy), [{
+      NvidiaMmaEncodingAttr parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent);
+      if (!parentAttr || (!parentAttr.isAmpere() && !parentAttr.isHopper()))
+        return $_get(context, opIdx, parent, 0);
+      // For MMAV2 and V3
+      unsigned bitwidth = eltTy.getIntOrFloatBitWidth();
+      unsigned kWidth = 32 / bitwidth;
+      return $_get(context, opIdx, parent, kWidth);
+    }]>
+  ];
+
+  let assemblyFormat = "`<` `{` struct(params) `}` `>`";
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = extraDistributedDeclaration;
+}
+
 def TTG_SharedMemorySpace : AttrDef<TritonGPU_Dialect, "SharedMemorySpace"> {
   let mnemonic = "shared_memory";
   let description = [{

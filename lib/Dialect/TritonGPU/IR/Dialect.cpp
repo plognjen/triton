@@ -858,6 +858,100 @@ LogicalResult DotOperandEncodingAttr::verify(
   return emitError() << "ttg.dot_op unexpected parent layout: " << parent;
 }
 
+
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getCTAsPerCGA() const {
+  return ::getCTAsPerCGA(getParent());
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getCTAOrder() const {
+  return ::getCTAOrder(getParent());
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getCTASplitNum() const {
+  SmallVector<unsigned> res = ::getCTASplitNum(getParent());
+  auto rank = res.size();
+  assert(rank == 2 || rank == 3 && "Invalid dotLayout");
+
+  // Do not split CTA in K dimension
+  auto kDim = getOpIdx() == 0 ? rank - 1 : rank - 2;
+  res[kDim] = 1;
+  return res;
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getWarpsPerCTA() const {
+  auto distributedLayout = mlir::cast<DistributedEncodingTrait>(getParent());
+  auto warps = distributedLayout.getWarpsPerCTA();
+  auto rank = warps.size();
+  auto kDim = getOpIdx() == 0 ? rank - 1 : rank - 2;
+  warps[kDim] = 1;
+  return warps;
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getDefaultOrder() const {
+  auto rank = getWarpsPerCTA().size();
+  return getOrderForDotOperand(getOpIdx(), rank, /*kContig*/ true);
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getDefaultWarpOrder() const {
+  // FIXME(Lezcano): Preexisting. Do we want to have this path at all?
+  if (mlir::isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(getParent())) {
+    return mlir::cast<DistributedEncodingTrait>(getParent())
+        .getDefaultWarpOrder();
+  }
+  llvm::report_fatal_error(
+      "DotOperandEncoding::getDefaultWarpOrder not implemented");
+  return {};
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getDefaultThreadOrder() const {
+  return getOrderForDotOperand(getOpIdx(), getWarpsPerCTA().size(),
+                               /*kContig*/ true);
+}
+
+LogicalResult DotScaledOperandEncodingAttr::verify(
+    ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+    unsigned opIdx, Attribute parent, unsigned kWidth) {
+  if (opIdx != 0 && opIdx != 1) {
+    return emitError() << "ttg.dot_op opIdx parameter can be 0 or 1, got: "
+                       << opIdx;
+  }
+  if (!parent) {
+    return emitError() << "ttg.dot_op parent parameter cannot be null";
+  }
+  if (auto parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent)) {
+    if (kWidth != 0 && !(parentAttr.isAmpere() || parentAttr.isHopper()))
+      return emitError() << "ttg.dot_op kWidth parameter can only be "
+                            "non-zero for Ampere or Hopper MMA parent";
+    if (kWidth == 0 && (parentAttr.isAmpere() || parentAttr.isHopper()))
+      return emitError() << "ttg.dot_op kWidth parameter is mandatory for "
+                            "Ampere or Hopper MMA parent";
+    if (opIdx != 0 && parentAttr.isHopper())
+      return emitError()
+             << "ttg.dot_op opIdx parameter must be 0 for "
+                "Hopper MMA parent, since Hopper WGMMA only allows first "
+                "operand to be in registers";
+    return success();
+  }
+
+  if (auto parentAttr = mlir::dyn_cast<AMDWmmaEncodingAttr>(parent)) {
+    if (kWidth != 16 && parentAttr.getVersion() == 1 ||
+        kWidth != 8 && kWidth != 16 && parentAttr.getVersion() == 2)
+      return emitError() << "ttg.dot_op kWidth parameter must be 16 for "
+                            "gfx11 and 8/16 for gfx12";
+    return success();
+  }
+
+  if (auto parentAttr = mlir::dyn_cast<AMDMfmaEncodingAttr>(parent)) {
+    if (kWidth == 0)
+      return emitError() << "ttg.dot_op kWidth parameter is mandatory for "
+                            "MFMA parent";
+    return success();
+  }
+
+  if (auto parentAttr = mlir::dyn_cast<BlockedEncodingAttr>(parent)) {
+    if (kWidth != 0)
+      return emitError() << "ttg.dot_op kWidth parameter is not supported "
+                            "when the parent is a blocked layout";
+    return success();
+  }
+
+  return emitError() << "ttg.dot_op unexpected parent layout: " << parent;
+}
+
 //===----------------------------------------------------------------------===//
 // Blocked Encoding
 //===----------------------------------------------------------------------===//
@@ -2221,6 +2315,26 @@ SmallVector<unsigned> DotOperandEncodingAttr::getThreadsPerWarp() const {
       "getThreadsPerWarp not implemented for DotOperandEncodingAttr");
   return {};
 }
+
+
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getRepOrder() const {
+  if (auto mma = mlir::dyn_cast<MmaEncodingTrait>(getParent())) {
+    return mma.getRepOrderForOperand(getOpIdx());
+  }
+  llvm::report_fatal_error(
+      "getRepOrder not implemented for DotOperandEncodingAttr");
+  return {};
+}
+
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getThreadsPerWarp() const {
+  if (auto mma = mlir::dyn_cast<MmaEncodingTrait>(getParent())) {
+    return mma.getThreadsPerWarpForOperand(getOpIdx());
+  }
+  llvm::report_fatal_error(
+      "getThreadsPerWarp not implemented for DotOperandEncodingAttr");
+  return {};
+}
+
 
 //===----------------------------------------------------------------------===//
 // ASM Interface (i.e.: alias)
