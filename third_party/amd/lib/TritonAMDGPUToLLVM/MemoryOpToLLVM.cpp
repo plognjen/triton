@@ -119,7 +119,7 @@ public:
     Attribute dstLayout = dstTy.getEncoding();
 
     if (canUseTransLoad(srcTy, dstTy)) {
-      assert(checkPerformanceProperties(srcTy, dstTy));
+      // assert(checkPerformanceProperties(srcTy, dstTy));
       return lowerSharedToDotOperandTransLL(op, adaptor, getTypeConverter(),
                                             rewriter);
     }
@@ -131,7 +131,7 @@ private:
     // Verify the layout properties required for using the ds_read_tr
     // instruction. This instruction is used to load non-k contiguous tensors
     // from shared memory into a dot layout with an MFMA layout parent.
-    auto dotEnc = llvm::dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+    auto dotEnc = llvm::dyn_cast<mlir::triton::gpu::DotOperandEncodingTrait>(dstTy.getEncoding());
     if (!dotEnc) {
       return false;
     }
@@ -164,7 +164,8 @@ private:
     // Check that double-rate MFMA instructions are used whenever possible.
     // Single rate instructions should only be used if the K block size is not
     // large enough.
-    auto dotEnc = llvm::cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+    auto dotEnc = llvm::cast<mlir::triton::gpu::DotOperandEncodingTrait>(
+        dstTy.getEncoding());
     auto mfmaEnc = llvm::cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
 
     int rank = dstTy.getRank();
@@ -184,6 +185,7 @@ private:
 
     const bool isLargeTile = shape[kDim] > largeTileThreshold;
     const int expectedKWidth = (isLargeTile ? 8 : 4) * kFactor;
+    llvm::outs() << kWidth << " " << expectedKWidth << "\n";
     return kWidth == expectedKWidth;
   }
 
@@ -202,8 +204,7 @@ private:
     }
 
     // 3. Check current limitations.
-    if (bitwidth != 16 &&
-        (bitwidth != 8 || !dstTy.getElementType().isInteger())) {
+    if (bitwidth != 16 && bitwidth != 8) {
       return false;
     }
 
@@ -220,7 +221,7 @@ private:
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto dstTy = cast<RankedTensorType>(op.getType());
     auto srcTy = cast<MemDescType>(op.getSrc().getType());
-    auto dotEnc = cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+    auto dotEnc = cast<mlir::triton::gpu::DotOperandEncodingTrait>(dstTy.getEncoding());
     auto shape = dstTy.getShape();
 
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());

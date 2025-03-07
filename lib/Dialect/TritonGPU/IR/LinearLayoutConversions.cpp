@@ -393,7 +393,7 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
 }
 
-LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
+LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingTrait dotMfmaLayout,
                                         ArrayRef<int64_t> shape,
                                         int32_t elemBitWidth) {
   auto mfmaLayout = llvm::cast<AMDMfmaEncodingAttr>(dotMfmaLayout.getParent());
@@ -542,31 +542,6 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
 
 LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
                                    ArrayRef<int64_t> shape) {
-
-  // Current linear layout conversion for dot operand is only necessary to
-  // enable LDS bypass for operand B in the MFMA dot path. To achieve
-  // performance gains from bypassing LDS, the following conditions must be met:
-  //
-  // 1) opIdx == 1: Currently, only the B tensor (e.g. weights in moe-like
-  //    kernels) bypasses LDS. This constraint is not strict and support for
-  //    bypassing operand A (e.g. Q tensor in flash attention) will be added in
-  //    the future.
-  //
-  // 2) B tensor must be column major: This is required to support vectorized
-  //    global load instructions, as MFMA instructions expect threads to hold B
-  //    operand elements along the K dimension.
-  //
-  // 3) kWidth == 8: Ensures maximum global load vectorization for fp16
-  //    operations.
-  //    TODO: Generalize conversion to handle maximum kWidth for other types
-  //    (i.e. fp8).
-  //
-  // 4) warpsPerCTA[mDim] == 1: This guarantees that every B tensor element is
-  //    held by exactly one thread, maintaining the same number of global loads
-  //    as in a blocked layout.
-  //
-  // Other use of Linear layout is a support of rare corner cases,
-  // for example one instruction tile is larger than tensor
   auto mfmaLayout = llvm::cast<AMDMfmaEncodingAttr>(dotMfmaLayout.getParent());
 
   auto rank = shape.size();
@@ -979,6 +954,14 @@ DotOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   }
 }
 
+LinearLayout
+DotScaledOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
+  auto parent = getParent();
+  auto mfmaLayout = mlir::cast<AMDMfmaEncodingAttr>(parent);
+  return chooseScaledMfmaOperandLayout(mfmaLayout, getKWidth(), getOpIdx(),
+                                       shape);
+}
+
 LinearLayout SliceEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   MLIRContext *ctx = getContext();
 
@@ -1354,27 +1337,18 @@ LinearLayout chooseLdMatrixLayout(Attribute enc, ArrayRef<int64_t> shape,
 
 LinearLayout chooseDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
                                      int32_t elemBitWidth) {
-  auto dot = cast<DotOperandEncodingAttr>(enc);
+  auto dot = cast<DotOperandEncodingTrait>(enc);
   return chooseDotDsReadB64TrLayout(dot, shape, elemBitWidth);
 }
 
 LinearLayout
 chooseScaledMfmaOperandLayout(AMDMfmaEncodingAttr mfmaEnc, int kWidth,
-                              int dotOperandIdx, ScaleDotElemType elemType,
-                              llvm::ArrayRef<int64_t> dotOperandShape) {
+                              int dotOperandIdx, llvm::ArrayRef<int64_t> dotOperandShape) {
   MLIRContext *ctx = mfmaEnc.getContext();
   unsigned mDim = mfmaEnc.getMDim();
-  if (elemType == ScaleDotElemType::E2M1) {
-    auto newEncoding =
-        DotOperandEncodingAttr::get(ctx, dotOperandIdx, mfmaEnc, kWidth / 2);
-    return newEncoding.toLinearLayout(dotOperandShape);
-  }
-
   // For mxfp8, each lane contains 32 elements, consisting of two blocks
   // of 16 consecutive elements. There's a gap between these two blocks,
   // which is not supported by normal dot layout.
-  assert(elemType == ScaleDotElemType::E4M3 ||
-         elemType == ScaleDotElemType::E5M2);
   using basisT = std::vector<std::vector<int32_t>>;
   unsigned rank = dotOperandShape.size();
   auto standardOutDims = standardOutDimNames(ctx, rank);
