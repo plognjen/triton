@@ -1226,7 +1226,28 @@ def SliceEncodingAttr : DistributedEncoding<"SliceEncoding", "slice_encoding"> {
   let hasCustomAssemblyFormat = 1;
 }
 
-def DotOperandEncodingAttr : DistributedEncoding<"DotOperandEncoding", "dot_operand_encoding"> {
+def DotOperandEncodingTrait : AttrInterface<"DotOperandEncodingTrait"> {
+  let cppNamespace = "::mlir::triton::gpu";
+  let description = [{
+    Common trait for all TTGIR layouts.
+  }];
+  let methods = [
+    InterfaceMethod<"Get the shape of the CTAs per CGA.",
+                    "unsigned",
+                    "getKWidth">,
+    InterfaceMethod<"Get the order of the CTAs per CGA. The fastest-changing axis first",
+                    "Attribute",
+                    "getParent">,
+    InterfaceMethod<"Each CTA processes 1/CTASplitNum of the tensor.",
+                    "unsigned",
+                    "getOpIdx">,
+    InterfaceMethod<"Get the default order of the registers per warp. The fastest-changing axis first",
+                    "SmallVector<unsigned>",
+                    "getDefaultOrder">,
+  ];
+}
+
+def DotOperandEncodingAttr : DistributedEncoding<"DotOperandEncoding", "dot_operand_encoding", [DotOperandEncodingTrait]> {
   let mnemonic = "dot_op";
 
   let description = [{
@@ -1285,6 +1306,37 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
       return $_get(context, opIdx, parent, kWidth);
     }]>
   ];
+
+  let assemblyFormat = "`<` `{` struct(params) `}` `>`";
+  let genVerifyDecl = 1;
+  let extraClassDeclaration = extraDistributedDeclaration;
+}
+
+def DotScaledOperandEncodingAttr : DistributedEncoding<"DotScaledOperandEncoding", "dot_scaled_operand_encoding", [DotOperandEncodingTrait]> {
+  let mnemonic = "dot_scaled_op";
+
+  let description = [{
+In the TritonGPU dialect, given `d = tt.dot a, b, c` tt.dot's operands a and b
+must be of DotOperandEncodingAttr layout, if the dot is MMA v1 or v2 (i.e.
+pre-Hopper).  For MMA v3, the operands are *almost always* in a regular shared
+encoding, but sometimes the LHS is also a dot-operand encoding.
+
+a's opIdx is 0, b's opIdx is 1.
+
+The parent field is the layout of d.
+
+kWidth defines number of consecutive elements stored by one thread along k dimension.
+Some layouts do not use this parameter, either because they have a fixed number of
+elements along the K dim, or they use all elements of the tensor along the K dim.
+
+  }];
+
+  let parameters = (
+    ins
+    "unsigned":$opIdx,
+    "Attribute":$parent,
+    DefaultValuedParameter<"unsigned", "0">:$kWidth
+  );
 
   let assemblyFormat = "`<` `{` struct(params) `}` `>`";
   let genVerifyDecl = 1;

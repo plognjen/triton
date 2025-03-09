@@ -564,14 +564,22 @@ public:
       if (failed(aScaledElemTy) || failed(bScaledElemTy))
         return failure();
 
-      auto aEncLL = chooseScaledMfmaOperandLayout(
-          mfmaEnc, kWidth, /*dotOperandIdx=*/0, aScaledElemTy.value(),
-          oldAType.getShape());
-      auto bEncLL = chooseScaledMfmaOperandLayout(
-          mfmaEnc, kWidth, /*dotOperandIdx=*/1, bScaledElemTy.value(),
-          oldBType.getShape());
-      auto newAEncoding = ttg::LinearEncodingAttr::get(ctx, aEncLL);
-      auto newBEncoding = ttg::LinearEncodingAttr::get(ctx, bEncLL);
+      auto getNewEncoding = [&](unsigned opIdx) -> Attribute {
+        auto elemType = (opIdx == 0) ? aScaledElemTy : bScaledElemTy;
+
+        if (elemType == ScaleDotElemType::E2M1) {
+          return ttg::DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc,
+                                                  kWidth / 2);
+        } else {
+          assert(elemType == ScaleDotElemType::E4M3 ||
+                 elemType == ScaleDotElemType::E5M2);
+          return ttg::DotScaledOperandEncodingAttr::get(ctx, opIdx, mfmaEnc,
+                                                        kWidth);
+        }
+      };
+
+      auto newAEncoding = getNewEncoding(/*opIdx*/ 0);
+      auto newBEncoding = getNewEncoding(/*opIdx*/ 1);
 
       a = convertAndCastTensor(rewriter, a, newAEncoding,
                                mfmaInstr->aElementType);
@@ -875,22 +883,35 @@ public:
 
     auto aShape = a.getType().getShape();
     auto bShape = b.getType().getShape();
-    auto aEncLL = chooseScaledMfmaOperandLayout(
-        mfmaEnc, kWidth, /*dotOperandIdx=*/0, aElemType, aShape);
-    auto bEncLL = chooseScaledMfmaOperandLayout(
-        mfmaEnc, kWidth, /*dotOperandIdx=*/1, bElemType, bShape);
-
-    auto convertInputLayout = [&](TensorValue v,
-                                  LinearLayout layout) -> TensorValue {
+    auto aEncLL = LinearLayout::empty();
+    auto bEncLL = LinearLayout::empty();
+    auto convertInputLayout = [&](TensorValue v, int opIdx) -> TensorValue {
       auto vType = v.getType();
+      auto &encLL = (opIdx == 0) ? aEncLL : bEncLL;
+      auto elemType = (opIdx == 0) ? aElemType : bElemType;
+      auto &shape = (opIdx == 0) ? aShape : bShape;
 
-      auto newEnc = ttg::LinearEncodingAttr::get(ctx, layout);
-      auto newVType = RankedTensorType::get(vType.getShape(),
-                                            vType.getElementType(), newEnc);
-      return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
+      if (elemType == ScaleDotElemType::E2M1) {
+        auto newEnc =
+            ttg::DotOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, kWidth / 2);
+        auto newVType = RankedTensorType::get(vType.getShape(),
+                                              vType.getElementType(), newEnc);
+        encLL *= newEnc.toLinearLayout(shape);
+        return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
+      } else {
+        assert(elemType == ScaleDotElemType::E4M3 ||
+               elemType == ScaleDotElemType::E5M2);
+        auto newEnc =
+            ttg::DotScaledOperandEncodingAttr::get(ctx, opIdx, mfmaEnc, kWidth);
+        auto newVType = RankedTensorType::get(vType.getShape(),
+                                              vType.getElementType(), newEnc);
+        encLL *= newEnc.toLinearLayout(shape);
+        return rewriter.create<ttg::ConvertLayoutOp>(v.getLoc(), newVType, v);
+      }
     };
-    a = convertInputLayout(a, aEncLL);
-    b = convertInputLayout(b, bEncLL);
+
+    a = convertInputLayout(a, 0);
+    b = convertInputLayout(b, 1);
 
     StringAttr kWarp = StringAttr::get(ctx, "warp");
     auto convertScaleLayout = [&](TensorValue scale,

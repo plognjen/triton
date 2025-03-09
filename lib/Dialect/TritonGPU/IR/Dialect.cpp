@@ -771,44 +771,35 @@ SmallVector<unsigned> DotOperandEncodingAttr::getCTAsPerCGA() const {
 SmallVector<unsigned> DotOperandEncodingAttr::getCTAOrder() const {
   return ::getCTAOrder(getParent());
 }
-SmallVector<unsigned> DotOperandEncodingAttr::getCTASplitNum() const {
-  SmallVector<unsigned> res = ::getCTASplitNum(getParent());
+
+SmallVector<unsigned> getCTASplitNumDotOperand(Attribute parent, unsigned opIdx) {
+  SmallVector<unsigned> res = ::getCTASplitNum(parent);
   auto rank = res.size();
   assert(rank == 2 || rank == 3 && "Invalid dotLayout");
 
   // Do not split CTA in K dimension
-  auto kDim = getOpIdx() == 0 ? rank - 1 : rank - 2;
+  auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
   res[kDim] = 1;
   return res;
 }
-SmallVector<unsigned> DotOperandEncodingAttr::getWarpsPerCTA() const {
-  auto distributedLayout = mlir::cast<DistributedEncodingTrait>(getParent());
+
+SmallVector<unsigned> getWarpsPerCTADotOperand(Attribute parent, unsigned opIdx) {
+  auto distributedLayout = mlir::cast<DistributedEncodingTrait>(parent);
   auto warps = distributedLayout.getWarpsPerCTA();
   auto rank = warps.size();
-  auto kDim = getOpIdx() == 0 ? rank - 1 : rank - 2;
+  auto kDim = opIdx == 0 ? rank - 1 : rank - 2;
   warps[kDim] = 1;
   return warps;
 }
-SmallVector<unsigned> DotOperandEncodingAttr::getDefaultOrder() const {
-  auto rank = getWarpsPerCTA().size();
-  return getOrderForDotOperand(getOpIdx(), rank, /*kContig*/ true);
+
+SmallVector<unsigned> DotOperandEncodingAttr::getCTASplitNum() const {
+  return getCTASplitNumDotOperand(getParent(), getOpIdx());
 }
-SmallVector<unsigned> DotOperandEncodingAttr::getDefaultWarpOrder() const {
-  // FIXME(Lezcano): Preexisting. Do we want to have this path at all?
-  if (mlir::isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(getParent())) {
-    return mlir::cast<DistributedEncodingTrait>(getParent())
-        .getDefaultWarpOrder();
-  }
-  llvm::report_fatal_error(
-      "DotOperandEncoding::getDefaultWarpOrder not implemented");
-  return {};
-}
-SmallVector<unsigned> DotOperandEncodingAttr::getDefaultThreadOrder() const {
-  return getOrderForDotOperand(getOpIdx(), getWarpsPerCTA().size(),
-                               /*kContig*/ true);
+SmallVector<unsigned> DotOperandEncodingAttr::getWarpsPerCTA() const {
+  return getWarpsPerCTADotOperand(getParent(), getOpIdx());
 }
 
-LogicalResult DotOperandEncodingAttr::verify(
+LogicalResult verifyDotOperandLayout(
     ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
     unsigned opIdx, Attribute parent, unsigned kWidth) {
   if (opIdx != 0 && opIdx != 1) {
@@ -856,6 +847,58 @@ LogicalResult DotOperandEncodingAttr::verify(
   }
 
   return emitError() << "ttg.dot_op unexpected parent layout: " << parent;
+}
+
+SmallVector<unsigned> DotOperandEncodingAttr::getDefaultOrder() const {
+  auto rank = getWarpsPerCTA().size();
+  return getOrderForDotOperand(getOpIdx(), rank, /*kContig*/ true);
+}
+SmallVector<unsigned> DotOperandEncodingAttr::getDefaultWarpOrder() const {
+  llvm::report_fatal_error(
+      "DotOperandEncoding::getDefaultWarpOrder not implemented");
+  return {};
+}
+SmallVector<unsigned> DotOperandEncodingAttr::getDefaultThreadOrder() const {
+  return getOrderForDotOperand(getOpIdx(), getWarpsPerCTA().size(),
+                               /*kContig*/ true);
+}
+
+LogicalResult DotOperandEncodingAttr::verify(
+    ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+    unsigned opIdx, Attribute parent, unsigned kWidth) {
+  return verifyDotOperandLayout(emitError, opIdx, parent, kWidth);
+}
+
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getCTAsPerCGA() const {
+  return ::getCTAsPerCGA(getParent());
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getCTAOrder() const {
+  return ::getCTAOrder(getParent());
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getCTASplitNum() const {
+  return getCTASplitNumDotOperand(getParent(), getOpIdx());
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getWarpsPerCTA() const {
+  return getWarpsPerCTADotOperand(getParent(), getOpIdx());
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getDefaultOrder() const {
+  auto rank = getWarpsPerCTA().size();
+  return getOrderForDotOperand(getOpIdx(), rank, /*kContig*/ true);
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getDefaultWarpOrder() const {
+  llvm::report_fatal_error(
+      "DotOperandEncoding::getDefaultWarpOrder not implemented");
+  return {};
+}
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getDefaultThreadOrder() const {
+  return getOrderForDotOperand(getOpIdx(), getWarpsPerCTA().size(),
+                               /*kContig*/ true);
+}
+
+LogicalResult DotScaledOperandEncodingAttr::verify(
+    ::llvm::function_ref<::mlir::InFlightDiagnostic()> emitError,
+    unsigned opIdx, Attribute parent, unsigned kWidth) {
+  return verifyDotOperandLayout(emitError, opIdx, parent, kWidth);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2221,6 +2264,26 @@ SmallVector<unsigned> DotOperandEncodingAttr::getThreadsPerWarp() const {
       "getThreadsPerWarp not implemented for DotOperandEncodingAttr");
   return {};
 }
+
+
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getRepOrder() const {
+  if (auto mma = mlir::dyn_cast<MmaEncodingTrait>(getParent())) {
+    return mma.getRepOrderForOperand(getOpIdx());
+  }
+  llvm::report_fatal_error(
+      "getRepOrder not implemented for DotOperandEncodingAttr");
+  return {};
+}
+
+SmallVector<unsigned> DotScaledOperandEncodingAttr::getThreadsPerWarp() const {
+  if (auto mma = mlir::dyn_cast<MmaEncodingTrait>(getParent())) {
+    return mma.getThreadsPerWarpForOperand(getOpIdx());
+  }
+  llvm::report_fatal_error(
+      "getThreadsPerWarp not implemented for DotOperandEncodingAttr");
+  return {};
+}
+
 
 //===----------------------------------------------------------------------===//
 // ASM Interface (i.e.: alias)

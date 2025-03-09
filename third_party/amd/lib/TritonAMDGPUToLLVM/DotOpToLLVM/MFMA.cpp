@@ -36,6 +36,7 @@ using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
 using ::mlir::LLVM::AMD::shuffleXor;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
+using ::mlir::triton::gpu::DotScaledOperandEncodingAttr;
 using ::mlir::triton::gpu::LinearEncodingAttr;
 
 using ValueTable = std::map<std::array<int, 3>, Value>;
@@ -762,9 +763,13 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
                                 triton::DotScaledOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter) {
-  assert(isa<LinearEncodingAttr>(op.getA().getType().getEncoding()) &&
-         isa<LinearEncodingAttr>(op.getB().getType().getEncoding()) &&
-         "Both lhs and rhs should be linear layout.");
+  bool isADotEnc = isa<DotOperandEncodingAttr, DotScaledOperandEncodingAttr>(
+      op.getA().getType().getEncoding());
+  bool isBDotEnc = isa<DotOperandEncodingAttr, DotScaledOperandEncodingAttr>(
+      op.getB().getType().getEncoding());
+  assert(isADotEnc && isBDotEnc &&
+         "Both lhs and rhs should be either dotOperand or dotScaledOperand "
+         "layout.");
 
   auto aScale = op.getAScale();
   auto bScale = op.getBScale();

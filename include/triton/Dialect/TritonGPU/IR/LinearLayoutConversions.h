@@ -272,7 +272,7 @@ LinearLayout chooseDsReadB64TrLayout(Attribute enc, ArrayRef<int64_t> shape,
 // layout, so we need to manually create linear layout for it.
 LinearLayout
 chooseScaledMfmaOperandLayout(AMDMfmaEncodingAttr mfmaEnc, int kWidth,
-                              int dotOperandIdx, ScaleDotElemType elemType,
+                              int dotOperandIdx,
                               llvm::ArrayRef<int64_t> dotOperandShape);
 
 LinearLayout getScaleTMEMStoreLinearLayout(RankedTensorType scaleType,
