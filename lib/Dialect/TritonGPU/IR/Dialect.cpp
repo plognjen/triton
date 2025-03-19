@@ -194,6 +194,10 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
           mlir::dyn_cast<AMDRotatingSharedEncodingAttr>(layout)) {
     return llvm::to_vector(sharedLayout.getOrder());
   }
+  if (auto sharedLayout =
+          mlir::dyn_cast<AMDLDSTransSharedEncodingAttr>(layout)) {
+    return llvm::to_vector(sharedLayout.getOrder());
+  }
   llvm::report_fatal_error("Unimplemented usage of getOrder for MemDescType");
   return {};
 }
@@ -682,6 +686,18 @@ SmallVector<unsigned> AMDRotatingSharedEncodingAttr::getCTAOrder() const {
   return SmallVector<unsigned>(getCTALayout().getCTAOrder());
 }
 SmallVector<unsigned> AMDRotatingSharedEncodingAttr::getCTASplitNum() const {
+  return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
+}
+
+int32_t AMDLDSTransSharedEncodingAttr::getAlignment() const { return 16; }
+
+SmallVector<unsigned> AMDLDSTransSharedEncodingAttr::getCTAsPerCGA() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
+}
+SmallVector<unsigned> AMDLDSTransSharedEncodingAttr::getCTAOrder() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAOrder());
+}
+SmallVector<unsigned> AMDLDSTransSharedEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
 }
 
@@ -1697,6 +1713,25 @@ Attribute AMDRotatingSharedEncodingAttr::parse(AsmParser &parser, Type type) {
 }
 
 void AMDRotatingSharedEncodingAttr::print(AsmPrinter &printer) const {
+  printer << "<{"
+          << "vec = " << getVec() //
+          << ", perPhase = " << getPerPhase()
+          << ", maxPhase = " << getMaxPhase() //
+          << ", order = [" << getOrder() << "]";
+  maybePrintCTALayout(getContext(), printer, getCTALayout(),
+                      /*rank=*/getOrder().size());
+  printer << "}>";
+}
+
+//===----------------------------------------------------------------------===//
+// LDSTransShared encoding
+//===----------------------------------------------------------------------===//
+
+Attribute AMDLDSTransSharedEncodingAttr::parse(AsmParser &parser, Type type) {
+  return parseSwizzledEncoding<AMDLDSTransSharedEncodingAttr>(parser, type);
+}
+
+void AMDLDSTransSharedEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "vec = " << getVec() //
           << ", perPhase = " << getPerPhase()

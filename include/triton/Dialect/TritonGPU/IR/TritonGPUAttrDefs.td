@@ -552,6 +552,31 @@ Swizzling examples (matrix is filled with numbers 0, 1, 2, .. columns*rows-1):
   let hasCustomAssemblyFormat = 1;
 }
 
+def AMDLDSTransSharedEncodingAttr :
+  TritonGPU_Attr<"AMDLDSTransSharedEncoding", "amd_lds_trans_shared_encoding",
+                 [SharedEncodingTrait, LayoutEncodingTrait]> {
+  let mnemonic = "amd_lds_trans_shared";
+
+  let description = [{
+  }];
+
+  let parameters = (
+    ins
+    "unsigned":$vec,
+    "unsigned":$perPhase,
+    "unsigned":$maxPhase,
+    ArrayRefParameter<"unsigned">:$order,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let extraClassDeclaration = extraBaseClassDeclaration # [{
+    int32_t getAlignment() const;
+    SmallVector<unsigned> getCTAsPerCGA() const;
+    SmallVector<unsigned> getCTAOrder() const;
+    SmallVector<unsigned> getCTASplitNum() const;
+  }];
+  let hasCustomAssemblyFormat = 1;
+}
 
 //===----------------------------------------------------------------------===//
 // Distributed Layout Encoding
