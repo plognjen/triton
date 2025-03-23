@@ -276,9 +276,15 @@ When vec=2, elements are swizzled in pairs of 2.  In other words, the element at
 
         // ---- begin MFMA ----
         if (auto mfmaEnc = mlir::dyn_cast<AMDMfmaEncodingAttr>(dotOpEnc.getParent())) {
-          return mfmaEnc.composeSharedLayoutForOperand(
-              CTALayout, dotOpEnc.getOpIdx(), shape, order, dotOpEnc.getKWidth(),
-              typeWidthInBit, needTrans);
+          int perPhase = 1;
+          int vecSize = 1;
+          int maxPhase = 1;
+
+          mfmaEnc.composeSharedLayoutParams(
+               dotOpEnc.getOpIdx(), shape, order, dotOpEnc.getKWidth(),
+              typeWidthInBit, needTrans, perPhase, vecSize, maxPhase);
+
+          return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
         }
 
         // ---- begin WMMA ----
@@ -1051,10 +1057,10 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
 
     // Returns a swizzled shared layout matching this MFMA layout for the
     // dot operand at the given |operandIdx| with |operandShape|.
-    SwizzledSharedEncodingAttr composeSharedLayoutForOperand(
-        CTALayoutAttr ctaLayout, int operandIdx, ArrayRef<int64_t> operandShape,
+    void composeSharedLayoutParams(
+        int operandIdx, ArrayRef<int64_t> operandShape,
         ArrayRef<unsigned> sharedOrder, unsigned vectorSize,
-        unsigned elemBitWidth, bool needTrans) const;
+        unsigned elemBitWidth, bool needTrans, int &perPhase, int &vecSize, int &maxPhase) const;
   }];
 
   let genVerifyDecl = 1;

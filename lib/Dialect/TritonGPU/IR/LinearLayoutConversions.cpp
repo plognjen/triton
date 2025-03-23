@@ -256,11 +256,18 @@ sharedToLinearLayoutAMDLDSTrans(ArrayRef<int64_t> shape,
     int vec = shared.getVec();
     int perPhase = shared.getPerPhase();
     int maxPhase = shared.getMaxPhase();
+    unsigned phase = (row / perPhase) % (2 * maxPhase);
+    unsigned block = phase / (maxPhase / 2);
 
-    int phase = (row / perPhase) % maxPhase;
-    int blockNo = row / maxPhase / perPhase % maxPhase;
-    int combinedPhase = phase ^ blockNo;
-    bases2D.push_back({row, (vec * combinedPhase) % numCols});
+    unsigned offset = 0;
+    if (block == 1 || block == 2) {
+      offset = maxPhase / 2;
+    } else if (block == 3) {
+      offset = maxPhase;
+    }
+
+    int col = (vec * (phase - offset)) % numCols;
+    bases2D.push_back({row, col});
   }
   LinearLayout ctaLayout =
       LinearLayout({{S("offset"), bases2D}}, {rowDimName, colDimName});
@@ -272,7 +279,8 @@ sharedToLinearLayoutAMDLDSTrans(ArrayRef<int64_t> shape,
         LinearLayout::identity1D(shape[dim], S("offset"), outDimNames[dim]);
   }
 
-  return combineCtaCgaWithShape(ctaLayout, shared.getCTALayout(), shape);
+  auto finalLay = combineCtaCgaWithShape(ctaLayout, shared.getCTALayout(), shape);
+  return finalLay;
 }
 
 } // namespace

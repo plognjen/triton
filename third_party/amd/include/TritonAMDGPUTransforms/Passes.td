@@ -219,5 +219,18 @@ def TritonAMDGPUInThreadTranspose: Pass<"tritonamdgpu-in-thread-transpose", "mli
 }
 
 
+def TritonAMDGPUSetLDSTransLayout: Pass<"tritonamdgpu-set-lds-trans-layout", "mlir::triton::FuncOp"> {
+  let summary = "Extend global load sizePerThread to 2D shape and perform transpose within registers per thread before writing to shared memory";
+
+  let description = [{
+    Pass looks for inefficient load->local_store->local_load chains.
+    In particular, this pass optimizes dot operand loading from shared memory
+    in cases when operand is stored in global memory in non-K-continous way.
+  }];
+
+  let constructor = "mlir::createTritonAMDGPUSetLDSTransLayoutPass()";
+
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect", "mlir::triton::gpu::TritonGPUDialect"];
+}
 
 #endif

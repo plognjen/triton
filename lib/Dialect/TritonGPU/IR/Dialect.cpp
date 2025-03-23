@@ -1813,14 +1813,12 @@ AMDMfmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
   }
 }
 
-SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
-    CTALayoutAttr ctaLayout, int operandIdx, ArrayRef<int64_t> operandShape,
-    ArrayRef<unsigned> sharedOrder, unsigned vectorSize, unsigned elemBitWidth,
-    bool needTrans) const {
-  int kDimIndex = operandIdx == 0 ? 1 : 0;
-  if (needTrans)
-    kDimIndex = 1 - kDimIndex;
+void AMDMfmaEncodingAttr::composeSharedLayoutParams(
+    int operandIdx, ArrayRef<int64_t> operandShape,
+    ArrayRef<unsigned> sharedOrder, unsigned kWidth, unsigned elemBitWidth,
+    bool needTrans, int &perPhase, int &vecSize, int &maxPhase) const {
 
+  int kDimIndex = operandIdx == 0 ? 1 : 0;
   bool isKContig = sharedOrder[0] == kDimIndex;
   // GFX950 supports LDS transpose load instructions, so we need swizzling even
   // when K dimension is not the contiguous dimension.
@@ -1828,11 +1826,20 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
   bool swizzleNonKContig =
       isGFX950 && (elemBitWidth == 8 || elemBitWidth == 16);
 
+  if (swizzleNonKContig && !isKContig) {
+    llvm::outs() << "aaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+    perPhase = 1;
+    vecSize = 16;
+    maxPhase = 8;
+    return;
+  }
   if (!isKContig && !swizzleNonKContig) {
     // Do not swizzle. In this case accesses will go in different banks even
     // without swizzling.
-    return SwizzledSharedEncodingAttr::get(getContext(), 1, 1, 1, sharedOrder,
-                                           ctaLayout);
+    perPhase = 1;
+    vecSize = 1;
+    maxPhase = 1;
+    return;
   }
 
   const unsigned numBanks = isGFX950 ? 64 : 32;
@@ -1843,16 +1850,16 @@ SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(
   int innerDimLength = operandShape[sharedOrder[0]];
   int elemsPerOneBanksRow = (numBanks * bankBitWidth) / elemBitWidth;
 
-  int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
-  int maxPhase =
-      std::max(std::min(simdWidth / perPhase, innerDimLength / vectorSize), 1u);
-
+  perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
+  vecSize = kWidth;
+  maxPhase =
+      std::max(std::min(simdWidth / perPhase, innerDimLength / kWidth), 1u);
+  llvm::outs() << "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n";
   // TODO (zhanglx): figure out better parameters for mfma4
   if (getMDim() == 4)
     maxPhase = 4;
 
-  return SwizzledSharedEncodingAttr::get(getContext(), vectorSize, perPhase,
-                                         maxPhase, sharedOrder, ctaLayout);
+  return;
 }
 
 //===----------------------------------------------------------------------===//

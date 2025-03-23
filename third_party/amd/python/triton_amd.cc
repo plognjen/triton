@@ -87,6 +87,10 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
     pm.addNestedPass<mlir::triton::FuncOp>(
         mlir::createTritonAMDGPUInThreadTransposePass());
   });
+  m.def("add_set_lds_trans_layout", [](mlir::PassManager &pm) {
+    pm.addNestedPass<mlir::triton::FuncOp>(
+        mlir::createTritonAMDGPUSetLDSTransLayoutPass());
+  });
 }
 
 void addControlConstant(llvm::Module *module, const char *name,

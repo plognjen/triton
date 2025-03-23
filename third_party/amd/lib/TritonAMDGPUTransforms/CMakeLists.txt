@@ -9,6 +9,7 @@ add_triton_library(TritonAMDGPUTransforms
   StreamPipeline.cpp
   MfmaGroup.cpp
   InThreadTranspose.cpp
+  SetLDSTransSharedEnc.cpp
 
   DEPENDS
   TritonAMDGPUIR
