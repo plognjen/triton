@@ -131,6 +131,28 @@ void addLocalLoadNoAliasScope(triton::gpu::LocalLoadOp localLoadOp,
 // Attaches the "AsyncCopies" alias scope to llLoadDirectToLdsOp
 void addAsyncCopyAliasScope(AliasAnalysisOpInterface llLoadDirectToLdsOp);
 
+template <typename T, typename U>
+std::vector<unsigned> multiDimDivision(const ArrayRef<T> denominator,
+                                       const ArrayRef<U> numerator) {
+  std::vector<unsigned> result;
+  result.reserve(numerator.size());
+  for (size_t i = 0; i < numerator.size(); ++i)
+    result.push_back(static_cast<unsigned>(denominator[i]) /
+                     static_cast<unsigned>(numerator[i]));
+  return result;
+}
+
+template <typename T, typename U>
+std::vector<unsigned> multiDimReminder(const ArrayRef<T> denominator,
+                                       const ArrayRef<U> numerator) {
+  std::vector<unsigned> result;
+  result.reserve(denominator.size());
+  for (size_t i = 0; i < denominator.size(); ++i)
+    result.push_back(static_cast<unsigned>(denominator[i]) %
+                     static_cast<unsigned>(numerator[i]));
+  return result;
+}
+
 } // namespace mlir::LLVM::AMD
 
 #endif // TRITON_THIRD_PARTY_AMD_LIB_TRITONAMDGPUTOLLVM_UTILITY_H_

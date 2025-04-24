@@ -1030,12 +1030,43 @@ LinearEncodingAttr::orderPerDim(StringAttr dimName,
 // have 4 warps. But perhaps for this we have to add some masking in some
 // places... We'll see
 SmallVector<unsigned> LinearEncodingAttr::getRepOrder() const {
-  // This is not correct, but:
-  // - It happens to agree in most places with the legacy layout
-  // - getRepOrder does not make sense for LinearEncodingAttr as it already has
-  //   the same shape as the tensor that uses it
-  return getOrder();
+  auto regDim = StringAttr::get(getContext(), "register");
+  auto &bases = getLinearLayout().getBases().find(regDim)->second;
+
+  // Compute number of CTA tiles in a layout.
+  unsigned totalElems = getLinearLayout().getTotalOutDimSize();
+  auto ctaShape = getShapePerCTATile();
+  unsigned elemsPerCTA =
+      std::accumulate(ctaShape.begin(), ctaShape.end(), 1, std::multiplies<>());
+  assert((totalElems % elemsPerCTA) == 0 &&
+         "Total elements must be divisible by elemsPerCTA");
+  unsigned numCTAs = totalElems / elemsPerCTA;
+
+  // To determine the CTA tile order, start by identifying the register basis
+  // vector that corresponds to the first element of the second CTA tile. The
+  // nonzero index in the logical tensor it maps to indicates the most minor
+  // dimension. Then, for each subsequent basis register (first element of
+  // some CTA tile), extract the next nonzero index to build the full dimension
+  // order.
+  unsigned totalPerThread =
+      product(basesPerDim(regDim, /*skipBroadcast=*/false)) / numCTAs;
+  unsigned startIndex = static_cast<unsigned>(std::log2(totalPerThread));
+
+  llvm::SmallSetVector<unsigned, 8> order;
+  for (unsigned i = startIndex; i < bases.size(); ++i) {
+    auto it = std::find_if(bases[i].begin(), bases[i].end(),
+                           [](unsigned v) { return v != 0; });
+    if (it != bases[i].end())
+      order.insert(std::distance(bases[i].begin(), it));
+  }
+
+  // Append any dims missing from our default order.
+  for (unsigned dim : getOrder())
+    order.insert(dim);
+
+  return SmallVector<unsigned>(order.begin(), order.end());
 }
+
 SmallVector<unsigned> LinearEncodingAttr::getCTAsPerCGA() const {
   // CTAs are split into an identity part (SplitNum) and a broadcast part
   return basesPerDim(StringAttr::get(getContext(), "block"),
