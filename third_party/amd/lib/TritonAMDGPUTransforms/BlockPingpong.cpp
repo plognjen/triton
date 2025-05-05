@@ -38,6 +38,7 @@ class Pingponger {
   SmallVector<ttg::LocalLoadOp> lLoadOps;
   SmallVector<ttg::LocalStoreOp> lStoreOps;
   SmallVector<tt::DotOp> dotOps;
+  SmallVector<tt::DotScaledOp> dotSOps;
   SmallVector<SmallVector<Operation *>> subViewOps;
   SmallVector<SmallVector<Operation *>> loadSliceOps;
   SmallVector<Operation *> dotSliceOps;
@@ -73,6 +74,7 @@ private:
   void transformOnePPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFourPPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformTwoPPClusters(OpBuilder &builder, Location loc);
+  LogicalResult transformFP4(OpBuilder &builder, Location loc);
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
@@ -625,6 +627,20 @@ LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
   return success();
 }
 
+LogicalResult Pingponger::transformFP4(OpBuilder &builder,
+                                                 Location loc) {
+  builder.setInsertionPointAfter(dotSOps[0]);
+  updateOpInsertion(dotSOps[0]);
+  //prependOp(lLoadOps[3], true);
+  //prependOp(lLoadOps[2], true);
+  prependOp(lLoadOps[1], true);
+  prependOp(lLoadOps[0], true);
+  prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
+  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
+return success();
+}
+
+
 // This function wraps forOp with cond_barrier. First, hold half of the warps
 // (warpHigh) in a block before the loop so the barriers in the loop synchronize
 // warps at the different point per the warp groups. After the loop, hold
@@ -683,9 +699,13 @@ void Pingponger::getDotPingponged() {
             lLoadOps.push_back(lLoad);
     } else if (auto lStore = dyn_cast<ttg::LocalStoreOp>(op))
       lStoreOps.push_back(lStore);
-    else if (auto pingpongDot = dyn_cast<tt::DotOp>(op))
+    else if (auto pingpongDot = dyn_cast<tt::DotOp>(op)) {
       if (pingpongDot.getType().getRank() == 2)
         dotOps.push_back(pingpongDot);
+    }
+    else if (auto pingpongDot = dyn_cast<tt::DotScaledOp>(op)) {
+      dotSOps.push_back(pingpongDot);
+      }
   });
 
   // Currently, pingpong scheduling is known as helpful under limited condition.
@@ -693,7 +713,9 @@ void Pingponger::getDotPingponged() {
   // software pipelining and dot rank=2. Also only accept the for-loop with
   // supported combination of operations because this transformation is very
   // tightly scheduling the latencies.
-  if (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotOps.size() != 1) {
+  
+  if (dotSOps.size() != 1) {
+  //if (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotSOps.size() != 1) {
     std::stringstream message;
     message << "Unable to match ping pong scheduling pattern. Details: "
             << gLoadOps.size() << " global loads, " << lLoadOps.size()
@@ -702,6 +724,16 @@ void Pingponger::getDotPingponged() {
     return;
   }
 
+    
+  if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the two ping pong "
+             "cluster transformation");
+        return;
+  }
+  addAsymmetricSyncToLoop(builder, loc);
+  return;
+
+ 
   // Determine if we have a persistent GEMM. This will decide how we interpret
   // any memory operations that we find in conditionals.
   auto assumeNotTaken = isPersistentGemm(dotOps.size());
