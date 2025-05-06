@@ -69,8 +69,14 @@ private:
   LogicalResult genLocalSlice(OpBuilder &builder, Value v,
                               Attribute dotEncoding, unsigned opIdx,
                               unsigned numSlices, int64_t sliceWidth);
+  LogicalResult genLocalSliceScales(OpBuilder &builder, Value v,
+                                    Attribute dotEncoding, unsigned opIdx,
+                                    unsigned numSlices, int64_t sliceWidth);
   LogicalResult sliceDot(OpBuilder &builder, Location loc, tt::DotOp op,
                          unsigned numSlices);
+  LogicalResult sliceDotScaled(OpBuilder &builder, Location loc,
+                               tt::DotScaledOp op, unsigned numSlices);
+
   void transformOnePPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFourPPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformTwoPPClusters(OpBuilder &builder, Location loc);
@@ -96,6 +102,10 @@ private:
                              DenseSet<ttg::LocalStoreOp> &dotLocalStores);
   template <typename T>
   void findClosestPredOps(Value v, DenseSet<T> &matchingOps);
+
+  LogicalResult genLocalSliceHelper(OpBuilder &builder, Value v, unsigned opIdx,
+                                    unsigned numSlices, int64_t sliceWidth,
+                                    RankedTensorType tensorType);
 };
 
 void Pingponger::updateOpInsertion(Operation *op) { lastInsertedOp = op; }
@@ -411,8 +421,6 @@ LogicalResult Pingponger::genLocalSlice(OpBuilder &builder, Value v,
                                         Attribute dotEncoding, unsigned opIdx,
                                         unsigned numSlices,
                                         int64_t sliceWidth) {
-  SmallVector<Operation *> slices;
-  SmallVector<Operation *> subviews;
   // TODO: support transformed input to dot
   auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
   if (!localLoad)
@@ -428,21 +436,70 @@ LogicalResult Pingponger::genLocalSlice(OpBuilder &builder, Value v,
     return failure();
   auto dotOperandEnc = ttg::DotOperandEncodingAttr::get(
       builder.getContext(), opIdx, dotEncoding, kWidth);
+
+  auto tensorType = RankedTensorType::get(shape, elementType, dotOperandEnc);
+
+  return genLocalSliceHelper(builder, v, opIdx, numSlices, sliceWidth,
+                             tensorType);
+}
+
+LogicalResult Pingponger::genLocalSliceScales(OpBuilder &builder, Value v,
+                                              Attribute dotEncoding,
+                                              unsigned opIdx,
+                                              unsigned numSlices,
+                                              int64_t sliceWidth) {
+  auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
+  if (!localLoad)
+    return failure();
+  auto memDesc = localLoad.getSrc();
+  auto type = cast<ttg::MemDescType>(memDesc.getType());
+  SmallVector<int64_t> shape = llvm::to_vector(type.getShape());
+  Type elementType = type.getElementType();
+  int64_t kIdx = opIdx == 0 ? 1 : 0;
+  shape[kIdx] = sliceWidth;
+
+  auto ll = mlir::triton::gpu::toLinearLayout(shape, dotEncoding);
+  auto dotOperandEnc = ttg::LinearEncodingAttr::get(type.getContext(), ll);
+  auto tensorType = RankedTensorType::get(shape, elementType, dotOperandEnc);
+
+  return genLocalSliceHelper(builder, v, 0, numSlices, sliceWidth, tensorType);
+}
+
+LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
+                                              unsigned opIdx,
+                                              unsigned numSlices,
+                                              int64_t sliceWidth,
+                                              RankedTensorType tensorType) {
+
+  SmallVector<Operation *> slices;
+  SmallVector<Operation *> subviews;
+
+  auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
+  if (!localLoad)
+    return failure();
+
+  auto memDesc = localLoad.getSrc();
+  auto type = cast<ttg::MemDescType>(memDesc.getType());
+  SmallVector<int64_t> shape = llvm::to_vector(type.getShape());
+  Type elementType = type.getElementType();
+  int64_t kIdx = opIdx == 0 ? 1 : 0;
+  shape[kIdx] = sliceWidth;
+
   auto subviewDescType = ttg::MemDescType::get(
       shape, elementType, type.getEncoding(), type.getMemorySpace(),
       type.getMutableMemory(), type.getAllocShape());
+
   for (int i = 0; i < numSlices; i++) {
     SmallVector<Value> offsetsVal;
     SmallVector<int64_t> offsets = {0, 0};
-    offsets[kIdx] = i;
+    offsets[opIdx == 0 ? 1 : 0] = i;
     for (int64_t off : offsets) {
       offsetsVal.push_back(constOffsets[off]);
     }
     Value newSmem = builder.create<ttg::MemDescSubviewOp>(
         v.getLoc(), subviewDescType, memDesc, offsetsVal);
-    Value prefetchSlice = builder.create<ttg::LocalLoadOp>(
-        v.getLoc(), RankedTensorType::get(shape, elementType, dotOperandEnc),
-        newSmem);
+    Value prefetchSlice =
+        builder.create<ttg::LocalLoadOp>(v.getLoc(), tensorType, newSmem);
     subviews.push_back(newSmem.getDefiningOp());
     slices.push_back(prefetchSlice.getDefiningOp());
   }
@@ -483,6 +540,90 @@ LogicalResult Pingponger::sliceDot(OpBuilder &builder, Location loc,
     prevDot = newOp;
     dotSliceOps.push_back(newOp);
   }
+  op->replaceAllUsesWith(prevDot);
+  op->erase();
+  for (auto loads : lLoadOps)
+    loads->erase();
+  return success();
+}
+
+LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
+                                         tt::DotScaledOp op,
+                                         unsigned numSlices) {
+  builder.setInsertionPointToStart(forOp.getBody());
+  auto typeB = op.getB().getType();
+  auto typeScaleB = op.getBScale().getType();
+  auto shapeB = typeB.getShape();
+  auto shapeScaleB = typeScaleB.getShape();
+
+  int64_t sliceWidth = shapeB[0] / numSlices;
+  int64_t sliceScaleWidth = shapeScaleB[1] / numSlices;
+  if (shapeB[1] % numSlices != 0)
+    return failure();
+
+  genOffsetConstants(loc, builder, numSlices, sliceWidth);
+  builder.setInsertionPointAfter(gLoadOps[0]);
+  auto dotEncoding = op.getType().getEncoding();
+
+  // Generate slices for operands A and B
+  if (genLocalSlice(builder, op.getA(), dotEncoding, 0, numSlices, sliceWidth)
+          .failed() ||
+      genLocalSlice(builder, op.getB(), dotEncoding, 1, numSlices, sliceWidth)
+          .failed())
+    return failure();
+
+  SmallVector<SmallVector<Operation *>> mainOperandSlices;
+  mainOperandSlices.push_back(loadSliceOps[0]);
+  mainOperandSlices.push_back(loadSliceOps[1]);
+  loadSliceOps.clear();
+
+  // Generate slices for scale tensors if they exist
+  Value aScale = op.getAScale();
+  Value bScale = op.getBScale();
+
+  SmallVector<SmallVector<Operation *>> scaleASlices;
+  SmallVector<SmallVector<Operation *>> scaleBSlices;
+  if (aScale) {
+    if (genLocalSliceScales(builder, aScale,
+                            op.getAScale().getType().getEncoding(), 0,
+                            numSlices, sliceScaleWidth)
+            .failed())
+      return failure();
+    scaleASlices = loadSliceOps;
+    loadSliceOps.clear();
+  }
+
+  if (bScale) {
+    if (genLocalSliceScales(builder, bScale,
+                            op.getBScale().getType().getEncoding(), 0,
+                            numSlices, sliceScaleWidth)
+            .failed())
+      return failure();
+    scaleBSlices = loadSliceOps;
+    loadSliceOps.clear();
+  }
+
+  Operation *prevDot = op;
+  for (int i = 0; i < numSlices; i++) {
+    IRMapping mapping;
+    mapping.map(op.getA(), mainOperandSlices[0][i]->getResult(0));
+    mapping.map(op.getB(), mainOperandSlices[1][i]->getResult(0));
+
+    // Map scale tensors if they exist
+    if (!scaleASlices.empty())
+      mapping.map(op.getAScale(), scaleASlices[0][i]->getResult(0));
+    if (!scaleBSlices.empty())
+      mapping.map(op.getBScale(), scaleBSlices[0][i]->getResult(0));
+
+    if (i > 0)
+      mapping.map(op.getC(), prevDot->getResult(0));
+
+    auto newOp = builder.clone(*op, mapping);
+    prevDot = newOp;
+    dotSliceOps.push_back(newOp);
+  }
+
+  // Replace original op with the last slice and cleanup
   op->replaceAllUsesWith(prevDot);
   op->erase();
   for (auto loads : lLoadOps)
@@ -627,19 +768,12 @@ LogicalResult Pingponger::transformTwoPPClusters(OpBuilder &builder,
   return success();
 }
 
-LogicalResult Pingponger::transformFP4(OpBuilder &builder,
-                                                 Location loc) {
+LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
   builder.setInsertionPointAfter(dotSOps[0]);
-  updateOpInsertion(dotSOps[0]);
-  //prependOp(lLoadOps[3], true);
-  //prependOp(lLoadOps[2], true);
-  prependOp(lLoadOps[1], true);
-  prependOp(lLoadOps[0], true);
-  prependOp(builder.create<ROCDL::SBarrierOp>(loc), true);
-  prependOp(builder.create<ROCDL::SchedBarrier>(loc, 0), true);
-return success();
+  if (sliceDotScaled(builder, loc, dotSOps[0], 4).failed())
+    return failure();
+  return success();
 }
-
 
 // This function wraps forOp with cond_barrier. First, hold half of the warps
 // (warpHigh) in a block before the loop so the barriers in the loop synchronize
@@ -702,10 +836,9 @@ void Pingponger::getDotPingponged() {
     else if (auto pingpongDot = dyn_cast<tt::DotOp>(op)) {
       if (pingpongDot.getType().getRank() == 2)
         dotOps.push_back(pingpongDot);
-    }
-    else if (auto pingpongDot = dyn_cast<tt::DotScaledOp>(op)) {
+    } else if (auto pingpongDot = dyn_cast<tt::DotScaledOp>(op)) {
       dotSOps.push_back(pingpongDot);
-      }
+    }
   });
 
   // Currently, pingpong scheduling is known as helpful under limited condition.
@@ -713,9 +846,9 @@ void Pingponger::getDotPingponged() {
   // software pipelining and dot rank=2. Also only accept the for-loop with
   // supported combination of operations because this transformation is very
   // tightly scheduling the latencies.
-  
+
   if (dotSOps.size() != 1) {
-  //if (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotSOps.size() != 1) {
+    // if (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotSOps.size() != 1) {
     std::stringstream message;
     message << "Unable to match ping pong scheduling pattern. Details: "
             << gLoadOps.size() << " global loads, " << lLoadOps.size()
@@ -723,17 +856,17 @@ void Pingponger::getDotPingponged() {
     LDBG(message.str());
     return;
   }
+  kWidth = 16;
 
-    
   if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
-        LDBG("Encountered failure when trying to execute the two ping pong "
-             "cluster transformation");
-        return;
+    LDBG("Encountered failure when trying to execute the two ping pong "
+         "cluster transformation");
+    return;
   }
   addAsymmetricSyncToLoop(builder, loc);
+
   return;
 
- 
   // Determine if we have a persistent GEMM. This will decide how we interpret
   // any memory operations that we find in conditionals.
   auto assumeNotTaken = isPersistentGemm(dotOps.size());
