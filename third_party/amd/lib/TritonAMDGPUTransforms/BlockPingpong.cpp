@@ -572,25 +572,16 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
           .failed())
     return failure();
 
-  SmallVector<SmallVector<Operation *>> mainOperandSlices;
-  mainOperandSlices.push_back(loadSliceOps[0]);
-  mainOperandSlices.push_back(loadSliceOps[1]);
-  loadSliceOps.clear();
-
   // Generate slices for scale tensors if they exist
   Value aScale = op.getAScale();
   Value bScale = op.getBScale();
 
-  SmallVector<SmallVector<Operation *>> scaleASlices;
-  SmallVector<SmallVector<Operation *>> scaleBSlices;
   if (aScale) {
     if (genLocalSliceScales(builder, aScale,
                             op.getAScale().getType().getEncoding(), 0,
                             numSlices, sliceScaleWidth)
             .failed())
       return failure();
-    scaleASlices = loadSliceOps;
-    loadSliceOps.clear();
   }
 
   if (bScale) {
@@ -599,21 +590,19 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
                             numSlices, sliceScaleWidth)
             .failed())
       return failure();
-    scaleBSlices = loadSliceOps;
-    loadSliceOps.clear();
   }
 
   Operation *prevDot = op;
   for (int i = 0; i < numSlices; i++) {
     IRMapping mapping;
-    mapping.map(op.getA(), mainOperandSlices[0][i]->getResult(0));
-    mapping.map(op.getB(), mainOperandSlices[1][i]->getResult(0));
+    mapping.map(op.getA(), loadSliceOps[0][i]->getResult(0));
+    mapping.map(op.getB(), loadSliceOps[1][i]->getResult(0));
 
     // Map scale tensors if they exist
-    if (!scaleASlices.empty())
-      mapping.map(op.getAScale(), scaleASlices[0][i]->getResult(0));
-    if (!scaleBSlices.empty())
-      mapping.map(op.getBScale(), scaleBSlices[0][i]->getResult(0));
+    if (aScale)
+      mapping.map(op.getAScale(), loadSliceOps[2][i]->getResult(0));
+    if (bScale)
+      mapping.map(op.getBScale(), loadSliceOps[3][i]->getResult(0));
 
     if (i > 0)
       mapping.map(op.getC(), prevDot->getResult(0));
