@@ -494,7 +494,8 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
     SmallVector<int64_t> offsets = {0, 0};
     offsets[opIdx == 0 ? 1 : 0] = i;
     for (int64_t off : offsets) {
-      offsetsVal.push_back(constOffsets[off]);
+      offsetsVal.push_back(builder.create<arith::ConstantIntOp>(
+          v.getLoc(), off * sliceWidth, 32));
     }
     Value newSmem = builder.create<ttg::MemDescSubviewOp>(
         v.getLoc(), subviewDescType, memDesc, offsetsVal);
@@ -561,7 +562,6 @@ LogicalResult Pingponger::sliceDotScaled(OpBuilder &builder, Location loc,
   if (shapeB[1] % numSlices != 0)
     return failure();
 
-  genOffsetConstants(loc, builder, numSlices, sliceWidth);
   builder.setInsertionPointAfter(gLoadOps[0]);
   auto dotEncoding = op.getType().getEncoding();
 
@@ -852,7 +852,7 @@ void Pingponger::getDotPingponged() {
          "cluster transformation");
     return;
   }
-  addAsymmetricSyncToLoop(builder, loc);
+  // addAsymmetricSyncToLoop(builder, loc);
 
   return;
 
