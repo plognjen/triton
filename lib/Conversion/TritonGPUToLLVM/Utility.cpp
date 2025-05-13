@@ -398,8 +398,8 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
     smemOffset = b.sub(smemOffset, baseToAllocBaseDist);
   }
   auto ptrTy = smemBase.getType();
-  auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, smemOffset,
-                       LLVM::GEPNoWrapFlags::inbounds);
+  auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, smemOffset);
+  vecAddr.setInbounds(true);
   return vecAddr;
 }
 
