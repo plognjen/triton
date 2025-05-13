@@ -1533,17 +1533,10 @@ LinearLayout chooseScaledMfmaScaleLayout(
   return newLL;
 }
 
-std::optional<LinearLayout>
-chooseMfmaLikeStoreLayout(RankedTensorType valType) {
-  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(valType.getEncoding());
-
-  // Currently support transposed [B]F16 MFMA32x32 on CDNA4
-  bool isMfma32 = mfmaLayout.getMDim() == 32 && mfmaLayout.getNDim() == 32;
-  Type elemType = valType.getElementType();
-  if (!(valType.getRank() == 2 && (elemType.isF16() || elemType.isBF16()) &&
-        mfmaLayout.getVersionMajor() == 4 && mfmaLayout.getIsTransposed() &&
-        isMfma32))
-    return {};
+LinearLayout chooseMfmaLikeStoreLayout(AMDMfmaEncodingAttr mfmaLayout,
+                                       ArrayRef<int64_t> shape) {
+  assert(shape.size() == 2 && mfmaLayout.getMDim() == 32 &&
+         mfmaLayout.getNDim() == 32 && mfmaLayout.getIsTransposed());
 
   MLIRContext *ctx = mfmaLayout.getContext();
   StringAttr kRegister = S("register");
@@ -1568,8 +1561,8 @@ chooseMfmaLikeStoreLayout(RankedTensorType valType) {
       identityStandardND(kWarp, mfmaLayout.getWarpsPerCTA(), order);
   LinearLayout ctaLayout = mfma8Layout.transposeOuts(standardOutDims) *
                            warpLayout.transposeOuts(standardOutDims);
-  mfma8Layout = combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(),
-                                       valType.getShape());
+  mfma8Layout =
+      combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape);
   return mfma8Layout;
 }
 
