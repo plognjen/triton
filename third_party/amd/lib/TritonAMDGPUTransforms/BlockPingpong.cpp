@@ -87,6 +87,7 @@ private:
   LogicalResult transformTwoPPClusters(OpBuilder &builder, Location loc);
   LogicalResult transformFAv3(OpBuilder &builder, Location loc);
   LogicalResult transformFP4(OpBuilder &builder, Location loc);
+  LogicalResult transformFP4s(OpBuilder &builder, Location loc);
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
@@ -1030,6 +1031,43 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
   return success();
 }
 
+LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
+  //FIXME: support nonscale.
+  if (lLoadOps.size() != 4)
+    return failure();
+
+  builder.setInsertionPointAfter(forOp);
+
+  // FIXME: This is duplicated code, need to refactorize.
+  auto i32ty = builder.getIntegerType(32);
+  auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
+  workIDX->moveBefore(forOp);
+  builder.setInsertionPointAfter(workIDX);
+  auto constZero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+  auto constWarpSize = builder.create<arith::ConstantIntOp>(loc, 256, 32);
+  auto warpIDX = builder.create<arith::DivSIOp>(loc, workIDX, constWarpSize);
+  auto warpLow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                               warpIDX, constZero);
+  auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                warpIDX, constZero);
+
+  builder.setInsertionPointAfter(dotSOps[0]);
+  updateOpInsertion(dotSOps[0]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+ 
+  for (int i = 0; i < 4; i++)
+    appendOp(lLoadOps[i]);
+  appendOp(dotSOps[0]);
+ 
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
+  return success();
+}
+
+	
 LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
   builder.setInsertionPointAfter(forOp);
@@ -1189,14 +1227,24 @@ void Pingponger::getDotPingponged() {
     auto aShape = aType.getShape();
     auto elemWidth = aType.getElementTypeBitWidth();
     int64_t tileSize = dotSShape[0] * dotSShape[1] * aShape[1];
-    if (tileSize != 8388608 || aShape[1] != 128 || elemWidth != 8)
-      return;
 
-    if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
-      LDBG("Encountered failure when trying to execute the two ping pong "
-           "cluster transformation");
-      return;
+    // 256x256x256 (128xi8)
+    if (tileSize == 8388608 && aShape[1] == 128 && elemWidth == 8){
+      if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the two ping pong "
+             "cluster transformation");
+        return;
+      }
     }
+    // 128x128x512 (256xi8)
+    else if (tileSize == 4194304 && aShape[1] == 256 && elemWidth == 8){
+      if (transformFP4s(builder, dotSOps[0]->getLoc()).failed()) {
+        LDBG("Encountered failure when trying to execute the two ping pong "
+             "cluster transformation");
+        return;
+      }
+    }
+ 
     addAsymmetricSyncToLoop(builder, loc);
     return;
   }
