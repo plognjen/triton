@@ -1036,6 +1036,9 @@ LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
   if (lLoadOps.size() != 4)
     return failure();
 
+//#define OBO
+
+#if defined (OBO)
   builder.setInsertionPointAfter(forOp);
 
   // FIXME: This is duplicated code, need to refactorize.
@@ -1064,6 +1067,51 @@ LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
  
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
+
+
+#else
+  auto tokens = asyncWaitOps[0].getAsyncToken();
+  Operation *aWait = asyncWaitOps[0];
+  builder.setInsertionPointToStart(forOp.getBody());
+  asyncWaitOps.clear();
+  for (int i = 0; i < 2; i++) {
+    auto newOp = builder.clone(*aWait);
+    newOp->eraseOperand(3 - i);
+    newOp->eraseOperand(1 - i);
+    asyncWaitOps.push_back(cast<ttg::AsyncWaitOp>(newOp));
+  }
+  lLoadOps[0]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[0]);
+  lLoadOps[2]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[0]);
+  lLoadOps[1]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[1]);
+  lLoadOps[3]->replaceUsesOfWith(aWait->getResult(0), asyncWaitOps[1]);
+  aWait->erase();
+
+  builder.setInsertionPointAfter(dotSOps[0]);
+  updateOpInsertion(dotSOps[0]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(lLoadOps[0]);
+  appendOp(lLoadOps[2]);
+
+  appendOp(asyncWaitOps[1]);
+
+  appendOp(asyncCopyOps[1]);
+  appendOp(asyncCopyOps[3]);
+  appendOp(asyncCommitOps[1]);
+  appendOp(asyncCommitOps[3]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  
+  appendOp(lLoadOps[1]);
+  appendOp(lLoadOps[3]);
+  appendOp(dotSOps[0]);
+
+#endif
+
   return success();
 }
 
