@@ -1032,44 +1032,10 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 }
 
 LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
-  //FIXME: support nonscale.
+  // FIXME: support nonscale.
   if (lLoadOps.size() != 4)
     return failure();
 
-//#define OBO
-
-#if defined (OBO)
-  builder.setInsertionPointAfter(forOp);
-
-  // FIXME: This is duplicated code, need to refactorize.
-  auto i32ty = builder.getIntegerType(32);
-  auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
-  workIDX->moveBefore(forOp);
-  builder.setInsertionPointAfter(workIDX);
-  auto constZero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-  auto constWarpSize = builder.create<arith::ConstantIntOp>(loc, 256, 32);
-  auto warpIDX = builder.create<arith::DivSIOp>(loc, workIDX, constWarpSize);
-  auto warpLow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                               warpIDX, constZero);
-  auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
-                                                warpIDX, constZero);
-
-  builder.setInsertionPointAfter(dotSOps[0]);
-  updateOpInsertion(dotSOps[0]);
-
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
- 
-  for (int i = 0; i < 4; i++)
-    appendOp(lLoadOps[i]);
-  appendOp(dotSOps[0]);
- 
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
-
-
-#else
   auto tokens = asyncWaitOps[0].getAsyncToken();
   Operation *aWait = asyncWaitOps[0];
   builder.setInsertionPointToStart(forOp.getBody());
@@ -1105,17 +1071,14 @@ LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   appendOp(builder.create<ROCDL::SBarrierOp>(loc));
   appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  
+
   appendOp(lLoadOps[1]);
   appendOp(lLoadOps[3]);
   appendOp(dotSOps[0]);
 
-#endif
-
   return success();
 }
 
-	
 LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
   builder.setInsertionPointAfter(forOp);
@@ -1267,8 +1230,8 @@ void Pingponger::getDotPingponged() {
   }
 
   // FIXME: place tile size restriction here and obtain kWidth
-  if (dotSOps.size() == 1) {
-    kWidth = 16;
+  if (dotSOps.size() == 1 && numWarps == 8 && numStages == 2 &&
+      asyncCopyOps.size() > 0) {
     auto dotSType = dotSOps[0].getType();
     auto dotSShape = dotSType.getShape();
     auto aType = dotSOps[0].getA().getType();
@@ -1277,7 +1240,9 @@ void Pingponger::getDotPingponged() {
     int64_t tileSize = dotSShape[0] * dotSShape[1] * aShape[1];
 
     // 256x256x256 (128xi8)
-    if (tileSize == 8388608 && aShape[1] == 128 && elemWidth == 8){
+    if (tileSize == 8388608 && aShape[0] == 256 && aShape[1] == 128 &&
+        elemWidth == 8) {
+      kWidth = 16;
       if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
         LDBG("Encountered failure when trying to execute the two ping pong "
              "cluster transformation");
@@ -1285,17 +1250,19 @@ void Pingponger::getDotPingponged() {
       }
     }
     // 128x128x512 (256xi8)
-    else if (tileSize == 4194304 && aShape[1] == 256 && elemWidth == 8){
+    else if (tileSize == 4194304 && aShape[0] == 128 && aShape[1] == 256 &&
+             elemWidth == 8) {
       if (transformFP4s(builder, dotSOps[0]->getLoc()).failed()) {
         LDBG("Encountered failure when trying to execute the two ping pong "
              "cluster transformation");
         return;
       }
     }
- 
+
     addAsymmetricSyncToLoop(builder, loc);
     return;
-  }
+  } else if (dotSOps.size() == 1)
+    return;
 
   // Determine if we have a persistent GEMM. This will decide how we interpret
   // any memory operations that we find in conditionals.
