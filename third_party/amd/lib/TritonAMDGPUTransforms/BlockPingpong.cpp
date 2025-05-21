@@ -1,4 +1,5 @@
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -11,6 +12,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 #define GEN_PASS_CLASSES
@@ -1187,6 +1189,38 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   // Slice LocalLoads of scales
 
   builder.setInsertionPoint(dotSOps[0]);
+
+  // ------- Split AsyncCopy
+  // asyncCopyOps[0].
+  auto asyncLoadA = asyncCopyOps[2];
+  auto srcTy = cast<RankedTensorType>(asyncLoadA.getSrc().getType());
+  auto splitTy = RankedTensorType::get({128, 128}, srcTy.getElementType(),
+                                       srcTy.getEncoding());
+  Value slicePtrs1 = builder.create<triton::amdgpu::ExtractSliceOp>(
+      loc, splitTy, asyncLoadA.getSrc(), builder.getDenseI64ArrayAttr({0, 0}));
+  Value slicePtrs2 = builder.create<triton::amdgpu::ExtractSliceOp>(
+      loc, splitTy, asyncLoadA.getSrc(),
+      builder.getDenseI64ArrayAttr({128, 0}));
+
+  auto memDesc = cast<ttg::MemDescType>(asyncLoadA.getResult().getType());
+  auto subviewDescType = ttg::MemDescType::get(
+      {128, 128}, memDesc.getElementType(), memDesc.getEncoding(),
+      memDesc.getMemorySpace(), memDesc.getMutableMemory(),
+      memDesc.getAllocShape());
+  Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+  Value off = builder.create<arith::ConstantIntOp>(loc, 128, 32);
+  Value ldsSlice1 = builder.create<ttg::MemDescSubviewOp>(
+      asyncLoadA.getLoc(), subviewDescType, asyncLoadA.getResult(),
+      ValueRange{zero, zero});
+  // auto ldsSlice2 = builder.create<ttg::MemDescSubviewOp>(
+  //     asyncLoadA.getLoc(), subviewDescType, memDesc, ValueRange{off, zero});
+  // auto asyncLoadA1 = builder.create<triton::gpu::AsyncCopyGlobalToLocalOp>(
+  //     loc, slicePtrs1, ldsSlice1, asyncLoadA.getCache(),
+  //     asyncLoadA.getEvictAttr(), asyncLoadA.getIsVolatileAttr());
+
+  auto copyOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
+      loc, slicePtrs1, ldsSlice1, asyncLoadA.getMask(), asyncLoadA.getOther(),
+      asyncLoadA.getCache(), asyncLoadA.getEvict(), asyncLoadA.getIsVolatile());
 
   // ------- Slice scaleA
   auto aScale = dotSOps[0].getAScale();
