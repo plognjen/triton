@@ -3,6 +3,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ValueRange.h"
@@ -14,6 +15,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/ADT/SmallVector.h"
 #include <cstdint>
 
 #define GEN_PASS_CLASSES
@@ -1243,14 +1245,37 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   // forOp.getBody()->addArgument(slicedBTokens[0].getType(), loc);
   // forOp.getBody()->addArgument(slicedBTokens[1].getType(), loc);
 
+  // Remove the old AsyncWait
+  auto oldAsyncWait = asyncWaitOps[0];
+  SmallVector<int64_t> tokenArgIds;
+  SmallVector<Value> initialTokens;
+  for (auto inputToken : oldAsyncWait->getOperands()) {
+    auto blockArg = dyn_cast<BlockArgument>(inputToken);
+    if (!blockArg) {
+      return failure();
+    }
+    tokenArgIds.push_back(blockArg.getArgNumber());
+    initialTokens.push_back(forOp.getInitArgs()[blockArg.getArgNumber()]);
+  }
+
+  // OpBuilder beforeFor(forOp);
+  // beforeFor.create<ttg::AsyncWaitOp>(loc, initialTokens);
+
   // Patch initial args, first look for existing token and duplicate
-  SmallVector<Value> initArgs(forOp.getInitArgs());
   Value foundToken;
-  for (auto initialArg : initArgs) {
+  for (auto initialArg : forOp.getInitArgs()) {
     if (initialArg.getType() == slicedATokens[0].getType()) {
       foundToken = initialArg;
     }
   }
+
+  // Cleanup old AsyncWait, we just replace it with one of its operands and will
+  // update each LocalLoad later
+  asyncWaitOps[0].getRetToken().replaceAllUsesWith(
+      Value(forOp.getBody()->getArgument(tokenArgIds.front())));
+  asyncWaitOps[0]->erase();
+
+  SmallVector<Value> initArgs(forOp.getInitArgs());
   SmallVector<Value> newArgs(6, foundToken);
   // forOp.getInitArgsMutable().append(newArgs);
   unsigned startIndex = forOp.getBody()->getNumArguments();
@@ -1267,7 +1292,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   Value loopCarriedTokensScaleA = forOp.getBody()->getArgument(startIndex + 4);
   Value loopCarriedTokensScaleB = forOp.getBody()->getArgument(startIndex + 5);
 
-  // Now path the yield to pass on the slices AsyncCopies
+  // Now patch the yield to pass the tokens of all sliced loads
   auto yieldOp = forOp.getBody()->getTerminator();
   SmallVector<Value> operands(yieldOp->getOperands());
   operands.append(slicedATokens.begin(), slicedATokens.end());
@@ -1350,9 +1375,6 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
       dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
 
   // Schedule values
-
-  // Schedule
-
   builder.setInsertionPointAfter(dotSOps[0]);
   updateOpInsertion(dotSOps[0]);
 
@@ -1416,7 +1438,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendOp(dot3.getDefiningOp());
   appendOp(dot4.getDefiningOp());
 
-  // Concat dot results
+  // Concat dot results and replace and erase old dot
   auto dotConcat = builder.create<triton::amdgpu::ConcatOp>(
       loc, accTy, ValueRange{dot1, dot2, dot3, dot4});
   dotSOps[0]->replaceAllUsesWith(dotConcat);
@@ -1431,11 +1453,6 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   commitB->replaceAllUsesWith(slicedBTokens[0].getDefiningOp());
   commitB->erase();
   asyncCopyOps[3]->erase();
-
-  // Cleanup old AsyncWait, we just replace it with one of its token
-  asyncWaitOps[0]->replaceAllUsesWith(
-      asyncWaitOps[0]->getOperand(0).getDefiningOp());
-  asyncWaitOps[0]->erase();
 
   // asyncCopyOps[2]->erase();
   // asyncCopyOps[3]->erase();
