@@ -14,6 +14,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include <cstdint>
 
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
@@ -103,6 +104,8 @@ private:
   SmallVector<Operation *> genClusterBarrier(OpBuilder &builder, Location loc);
   LogicalResult genScaleSlice(OpBuilder &builder, Value v, unsigned numSlices,
                               int sliceDim);
+  SmallVector<Value> genSplitAsyncCopy(OpBuilder &builder, Value v,
+                                       unsigned numSlices, unsigned sliceDim);
   LogicalResult genOperandSlice(OpBuilder &builder, Value v, unsigned numSlices,
                                 int sliceDim);
   void appendClusterBarrier(OpBuilder &builder, Location loc);
@@ -1133,8 +1136,6 @@ LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
 
 LogicalResult Pingponger::genScaleSlice(OpBuilder &builder, Value v,
                                         unsigned numSlices, int sliceDim) {
-  llvm::outs() << "SLICE\n";
-  LDBG("TEST?");
   // TODO: support transformed input to dot
   auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
   if (!localLoad)
@@ -1175,12 +1176,52 @@ LogicalResult Pingponger::genScaleSlice(OpBuilder &builder, Value v,
     slicedSubviews.push_back(newSmem);
     slicedLoads.push_back(prefetchSlice);
   }
-  //     auto tensorType =
-  //         RankedTensorType::get(shape, elementType, dotOperandEnc);
-
-  // return genLocalSliceHelper(builder, v, opIdx, numSlices, sliceWidth,
-  //                            tensorType);
   return success();
+}
+
+SmallVector<Value> Pingponger::genSplitAsyncCopy(OpBuilder &builder, Value v,
+                                                 unsigned numSlices,
+                                                 unsigned sliceDim) {
+  auto loc = v.getLoc();
+  auto copyOp = cast<ttg::AsyncCopyGlobalToLocalOp>(v.getDefiningOp());
+  auto srcTy = cast<RankedTensorType>(copyOp.getSrc().getType());
+
+  SmallVector<int64_t> shape = to_vector(srcTy.getShape());
+  int64_t sliceDimSize = shape[sliceDim];
+  int64_t sliceWidth = sliceDimSize / numSlices;
+  shape[sliceDim] = sliceWidth;
+
+  auto splitTy =
+      RankedTensorType::get(shape, srcTy.getElementType(), srcTy.getEncoding());
+  auto memDesc = cast<ttg::MemDescType>(copyOp.getResult().getType());
+  auto subviewDescType = ttg::MemDescType::get(
+      {128, 128}, memDesc.getElementType(), memDesc.getEncoding(),
+      memDesc.getMemorySpace(), memDesc.getMutableMemory(),
+      memDesc.getAllocShape());
+
+  SmallVector<Value> tokens;
+  for (int i = 0; i < numSlices; i++) {
+    SmallVector<int64_t> offsets(shape.size(), 0);
+    offsets[sliceDim] = sliceWidth * i;
+    Value slicedSrc = builder.create<triton::amdgpu::ExtractSliceOp>(
+        loc, splitTy, copyOp.getSrc(), builder.getDenseI64ArrayAttr(offsets));
+
+    SmallVector<Value> offsetVals;
+    for (auto &o : offsets)
+      offsetVals.push_back(builder.create<arith::ConstantIntOp>(loc, o, 32));
+
+    Value subview = builder.create<ttg::MemDescSubviewOp>(
+        copyOp.getLoc(), subviewDescType, copyOp.getResult(), offsetVals);
+
+    Value slicedCopy = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
+        loc, slicedSrc, subview, copyOp.getMask(), copyOp.getOther(),
+        copyOp.getCache(), copyOp.getEvict(), copyOp.getIsVolatile());
+    Value commit = builder.create<ttg::AsyncCommitGroupOp>(
+        loc, slicedCopy.getType(), ValueRange(slicedCopy));
+    tokens.push_back(commit);
+  }
+
+  return tokens;
 }
 
 LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
@@ -1191,36 +1232,54 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   builder.setInsertionPoint(dotSOps[0]);
 
   // ------- Split AsyncCopy
-  // asyncCopyOps[0].
-  auto asyncLoadA = asyncCopyOps[2];
-  auto srcTy = cast<RankedTensorType>(asyncLoadA.getSrc().getType());
-  auto splitTy = RankedTensorType::get({128, 128}, srcTy.getElementType(),
-                                       srcTy.getEncoding());
-  Value slicePtrs1 = builder.create<triton::amdgpu::ExtractSliceOp>(
-      loc, splitTy, asyncLoadA.getSrc(), builder.getDenseI64ArrayAttr({0, 0}));
-  Value slicePtrs2 = builder.create<triton::amdgpu::ExtractSliceOp>(
-      loc, splitTy, asyncLoadA.getSrc(),
-      builder.getDenseI64ArrayAttr({128, 0}));
+  auto slicedATokens = genSplitAsyncCopy(builder, Value(asyncCopyOps[2]), 2, 0);
+  auto slicedBTokens = genSplitAsyncCopy(builder, Value(asyncCopyOps[3]), 2, 1);
+  if (slicedATokens.empty() || slicedBTokens.empty())
+    return failure();
 
-  auto memDesc = cast<ttg::MemDescType>(asyncLoadA.getResult().getType());
-  auto subviewDescType = ttg::MemDescType::get(
-      {128, 128}, memDesc.getElementType(), memDesc.getEncoding(),
-      memDesc.getMemorySpace(), memDesc.getMutableMemory(),
-      memDesc.getAllocShape());
-  Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-  Value off = builder.create<arith::ConstantIntOp>(loc, 128, 32);
-  Value ldsSlice1 = builder.create<ttg::MemDescSubviewOp>(
-      asyncLoadA.getLoc(), subviewDescType, asyncLoadA.getResult(),
-      ValueRange{zero, zero});
-  // auto ldsSlice2 = builder.create<ttg::MemDescSubviewOp>(
-  //     asyncLoadA.getLoc(), subviewDescType, memDesc, ValueRange{off, zero});
-  // auto asyncLoadA1 = builder.create<triton::gpu::AsyncCopyGlobalToLocalOp>(
-  //     loc, slicePtrs1, ldsSlice1, asyncLoadA.getCache(),
-  //     asyncLoadA.getEvictAttr(), asyncLoadA.getIsVolatileAttr());
+  // ------ Adjust loop to new tokens
+  // forOp.getBody()->addArgument(slicedATokens[0].getType(), loc);
+  // forOp.getBody()->addArgument(slicedATokens[1].getType(), loc);
+  // forOp.getBody()->addArgument(slicedBTokens[0].getType(), loc);
+  // forOp.getBody()->addArgument(slicedBTokens[1].getType(), loc);
 
-  auto copyOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
-      loc, slicePtrs1, ldsSlice1, asyncLoadA.getMask(), asyncLoadA.getOther(),
-      asyncLoadA.getCache(), asyncLoadA.getEvict(), asyncLoadA.getIsVolatile());
+  // Patch initial args, first look for existing token and duplicate
+  SmallVector<Value> initArgs(forOp.getInitArgs());
+  Value foundToken;
+  for (auto initialArg : initArgs) {
+    if (initialArg.getType() == slicedATokens[0].getType()) {
+      foundToken = initialArg;
+    }
+  }
+  SmallVector<Value> newArgs(6, foundToken);
+  // forOp.getInitArgsMutable().append(newArgs);
+  unsigned startIndex = forOp.getBody()->getNumArguments();
+  auto newBlockArgs = addIterArgsToLoop(builder, forOp, newArgs);
+
+  SmallVector<Value> loopCarriedTokensSliceA = {
+      forOp.getBody()->getArgument(startIndex),
+      forOp.getBody()->getArgument(startIndex + 1),
+  };
+  SmallVector<Value> loopCarriedTokensSliceB = {
+      forOp.getBody()->getArgument(startIndex + 2),
+      forOp.getBody()->getArgument(startIndex + 3),
+  };
+  Value loopCarriedTokensScaleA = forOp.getBody()->getArgument(startIndex + 4);
+  Value loopCarriedTokensScaleB = forOp.getBody()->getArgument(startIndex + 5);
+
+  // Now path the yield to pass on the slices AsyncCopies
+  auto yieldOp = forOp.getBody()->getTerminator();
+  SmallVector<Value> operands(yieldOp->getOperands());
+  operands.append(slicedATokens.begin(), slicedATokens.end());
+  operands.append(slicedBTokens.begin(), slicedBTokens.end());
+  // ScaleA (commit group)
+  operands.push_back(asyncCopyOps[0]->getUsers().begin()->getResult(0));
+  // ScaleB (commit group)
+  operands.push_back(asyncCopyOps[1]->getUsers().begin()->getResult(0));
+
+  OpBuilder builder2(yieldOp);
+  builder2.create<scf::YieldOp>(yieldOp->getLoc(), operands);
+  yieldOp->erase();
 
   // ------- Slice scaleA
   auto aScale = dotSOps[0].getAScale();
@@ -1253,6 +1312,8 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   }
   Value sliceOperandB1 = loadSliceOps[3][0]->getResult(0);
   Value sliceOperandB2 = loadSliceOps[3][1]->getResult(0);
+
+  // We have to adjust the tokens since we now have 2 separate tokens
 
   // -------- Slice Accumualator into 4 pieces
   Value acc = dotSOps[0].getC();
@@ -1288,11 +1349,99 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
       sliceScaleB2, dotSOps[0].getAElemTypeAttr(),
       dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
 
+  // Schedule values
+
+  // Schedule
+
+  builder.setInsertionPointAfter(dotSOps[0]);
+  updateOpInsertion(dotSOps[0]);
+
+  // A0
+  appendOp(slicedATokens[0].getDefiningOp()->getOperand(0).getDefiningOp());
+  appendOp(slicedATokens[0].getDefiningOp());
+  // B0
+  appendOp(slicedBTokens[0].getDefiningOp()->getOperand(0).getDefiningOp());
+  appendOp(slicedBTokens[0].getDefiningOp());
+  // SA
+  appendOp(asyncCopyOps[0]);
+  for (auto user : asyncCopyOps[0]->getUsers())
+    appendOp(user);
+  // SB
+  appendOp(asyncCopyOps[1]);
+  for (auto user : asyncCopyOps[1]->getUsers())
+    appendOp(user);
+
+  // Local Loads A0, B0, SA0, SB0
+  appendOp(sliceOperandA1.getDefiningOp());
+  appendOp(sliceOperandB1.getDefiningOp());
+  appendOp(sliceScaleA1.getDefiningOp());
+  appendOp(sliceScaleB1.getDefiningOp());
+  // TODO add async wait B1
+  appendOp(
+      builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceB[1], 0));
+
+  appendOp(dot1.getDefiningOp());
+  // TODO add barrier
+  // B1
+  appendOp(slicedBTokens[1].getDefiningOp()->getOperand(0).getDefiningOp());
+  appendOp(slicedBTokens[1].getDefiningOp());
+
+  // Local Loads B1, SB1
+  appendOp(sliceOperandB2.getDefiningOp());
+  appendOp(sliceScaleB2.getDefiningOp());
+
+  // TODO async wait A1
+  appendOp(
+      builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceA[1], 0));
+
+  appendOp(dot2.getDefiningOp());
+
+  // TODO barrier
+
+  // A1
+  appendOp(slicedATokens[0].getDefiningOp()->getOperand(0).getDefiningOp());
+  appendOp(slicedATokens[0].getDefiningOp());
+
+  // Local loads A1, SA1
+  appendOp(sliceOperandA2.getDefiningOp());
+  appendOp(sliceScaleA2.getDefiningOp());
+
+  // TODO asyn wait A0, B0, SA, SB
+  appendOp(builder.create<ttg::AsyncWaitOp>(
+      loc,
+      ValueRange{loopCarriedTokensSliceA[0], loopCarriedTokensSliceB[0],
+                 loopCarriedTokensScaleA, loopCarriedTokensScaleB},
+      0));
+
+  appendOp(dot3.getDefiningOp());
+  appendOp(dot4.getDefiningOp());
+
   // Concat dot results
   auto dotConcat = builder.create<triton::amdgpu::ConcatOp>(
       loc, accTy, ValueRange{dot1, dot2, dot3, dot4});
   dotSOps[0]->replaceAllUsesWith(dotConcat);
   dotSOps[0].erase();
+
+  // Cleanup old AsyncCopies, we just rewrite the token to use the first slice
+  auto commitA = *asyncCopyOps[2]->getUsers().begin();
+  commitA->replaceAllUsesWith(slicedATokens[0].getDefiningOp());
+  commitA->erase();
+  asyncCopyOps[2]->erase();
+  auto commitB = *asyncCopyOps[3]->getUsers().begin();
+  commitB->replaceAllUsesWith(slicedBTokens[0].getDefiningOp());
+  commitB->erase();
+  asyncCopyOps[3]->erase();
+
+  // Cleanup old AsyncWait, we just replace it with one of its token
+  asyncWaitOps[0]->replaceAllUsesWith(
+      asyncWaitOps[0]->getOperand(0).getDefiningOp());
+  asyncWaitOps[0]->erase();
+
+  // asyncCopyOps[2]->erase();
+  // asyncCopyOps[3]->erase();
+
+  // oldCommit->erase();
+  // asyncLoadA->erase();
 
   //  ::mlir::triton::ScaleDotElemTypeAttr a_elem_type,
   //  ::mlir::triton::ScaleDotElemTypeAttr b_elem_type, ::mlir::BoolAttr
