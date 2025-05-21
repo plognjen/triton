@@ -4,9 +4,11 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
@@ -88,6 +90,7 @@ private:
   LogicalResult transformFAv3(OpBuilder &builder, Location loc);
   LogicalResult transformFP4(OpBuilder &builder, Location loc);
   LogicalResult transformFP4s(OpBuilder &builder, Location loc);
+  LogicalResult transformFP4mn(OpBuilder &builder, Location loc);
   void addAsymmetricSyncToLoop(OpBuilder &builder, Location loc);
   void updateOpInsertion(Operation *Op);
   void appendOp(Operation *Op);
@@ -95,6 +98,8 @@ private:
   void moveOpAndPredecessorsUpSameBlock(Operation *Op);
   void appendSlicedLoadAB(int slice);
   SmallVector<Operation *> genClusterBarrier(OpBuilder &builder, Location loc);
+  LogicalResult genScaleSlice(OpBuilder &builder, Value v, unsigned numSlices,
+                              int sliceDim);
   void appendClusterBarrier(OpBuilder &builder, Location loc);
   void prependClusterBarrier(OpBuilder &builder, Location loc);
   void appendOpWithPrio(OpBuilder &builder, Operation *Op, Location loc);
@@ -1032,6 +1037,7 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 }
 
 LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
+  llvm::outs() << "PINGPONG S!\n";
   // FIXME: support nonscale.
   if (lLoadOps.size() != 4)
     return failure();
@@ -1080,6 +1086,129 @@ LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
 }
 
 LogicalResult Pingponger::transformFP4(OpBuilder &builder, Location loc) {
+
+  builder.setInsertionPointAfter(forOp);
+
+  // FIXME: This is duplicated code, need to refactorize.
+  auto i32ty = builder.getIntegerType(32);
+  auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
+  workIDX->moveBefore(forOp);
+  builder.setInsertionPointAfter(workIDX);
+  auto constZero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+  auto constWarpSize = builder.create<arith::ConstantIntOp>(loc, 256, 32);
+  auto warpIDX = builder.create<arith::DivSIOp>(loc, workIDX, constWarpSize);
+  auto warpLow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                               warpIDX, constZero);
+  auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                warpIDX, constZero);
+
+  builder.setInsertionPointAfter(dotSOps[0]);
+
+  if (sliceDotScaled(builder, loc, dotSOps[0], 4).failed())
+    return failure();
+  updateOpInsertion(dotSliceOps[0]);
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++)
+      appendOp(subViewOps[i][j]);
+    for (int i = 0; i < 4; i++)
+      appendOp(loadSliceOps[i][j]);
+    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+    appendOp(dotSliceOps[j]);
+  }
+
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
+
+  return success();
+}
+
+LogicalResult Pingponger::genScaleSlice(OpBuilder &builder, Value v,
+                                        unsigned numSlices, int sliceDim) {
+  llvm::outs() << "SLICE\n";
+  LDBG("TEST?");
+  // TODO: support transformed input to dot
+  auto localLoad = v.getDefiningOp<ttg::LocalLoadOp>();
+  if (!localLoad)
+    return failure();
+  auto memDesc = localLoad.getSrc();
+  auto type = cast<ttg::MemDescType>(memDesc.getType());
+  auto srcTy = cast<RankedTensorType>(v.getType());
+  SmallVector<int64_t> shape = llvm::to_vector(type.getShape());
+  Type elementType = type.getElementType();
+  int64_t sliceDimSize = shape[sliceDim];
+  int64_t sliceWidth = sliceDimSize / numSlices;
+  shape[sliceDim] = sliceWidth;
+  // if (sliceWidth < 16)
+  //   return failure();
+  // auto dotOperandEnc = ttg::DotOperandEncodingAttr::get(
+  //     builder.getContext(), opIdx, dotEncoding, kWidth);
+
+  auto llEnc = cast<ttg::LinearEncodingAttr>(srcTy.getEncoding());
+  auto newLLEnc = triton::gpu::LinearEncodingAttr::get(builder.getContext(),
+                                                       llEnc.getLinearLayout());
+  auto sliceType = RankedTensorType::get(shape, elementType, newLLEnc);
+
+  auto subviewDescType = ttg::MemDescType::get(
+      shape, elementType, type.getEncoding(), type.getMemorySpace(),
+      type.getMutableMemory(), type.getAllocShape());
+
+  auto &slicedSubviews = subViewOps.emplace_back();
+  auto &slicedLoads = loadSliceOps.emplace_back();
+  for (int i = 0; i < numSlices; i++) {
+    SmallVector<Value> offsetsVal;
+    SmallVector<int64_t> offsets = {0, 0};
+    offsets[sliceDim] = i;
+    for (int64_t off : offsets) {
+      offsetsVal.push_back(builder.create<arith::ConstantIntOp>(
+          v.getLoc(), off * sliceWidth, 32));
+    }
+    auto newSmem = builder.create<ttg::MemDescSubviewOp>(
+        v.getLoc(), subviewDescType, memDesc, offsetsVal);
+    auto prefetchSlice = builder.create<ttg::LocalLoadOp>(
+        v.getLoc(), sliceType, newSmem, localLoad.getToken());
+    slicedSubviews.push_back(newSmem);
+    slicedLoads.push_back(prefetchSlice);
+  }
+  //     auto tensorType =
+  //         RankedTensorType::get(shape, elementType, dotOperandEnc);
+
+  // return genLocalSliceHelper(builder, v, opIdx, numSlices, sliceWidth,
+  //                            tensorType);
+  return success();
+}
+
+LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
+  llvm::outs() << "PINGPONG!\n";
+
+  // Slice LocalLoads of scales
+
+  builder.setInsertionPoint(dotSOps[0]);
+  auto aScale = dotSOps[0].getAScale();
+
+  if (failed(genScaleSlice(builder, aScale, 2, 0))) {
+    return failure();
+  }
+  Value sliceScaleA1 = loadSliceOps[0][0]->getResult(0);
+  Value sliceScaleA2 = loadSliceOps[0][1]->getResult(0);
+  auto concatScaleA = builder.create<triton::amdgpu::ConcatOp>(
+      loc, aScale.getType(), ValueRange{sliceScaleA1, sliceScaleA2});
+  dotSOps[0].getAScaleMutable().assign(concatScaleA);
+
+  auto bScale = dotSOps[0].getBScale();
+  if (failed(genScaleSlice(builder, bScale, 2, 0))) {
+    return failure();
+  }
+  Value sliceScaleB1 = loadSliceOps[1][0]->getResult(0);
+  Value sliceScaleB2 = loadSliceOps[1][1]->getResult(0);
+  auto concatScaleB = builder.create<triton::amdgpu::ConcatOp>(
+      loc, aScale.getType(), ValueRange{sliceScaleB1, sliceScaleB2});
+  dotSOps[0].getBScaleMutable().assign(concatScaleA);
+
+  return success(0);
 
   builder.setInsertionPointAfter(forOp);
 
@@ -1243,7 +1372,7 @@ void Pingponger::getDotPingponged() {
     if (tileSize == 8388608 && aShape[0] == 256 && aShape[1] == 128 &&
         elemWidth == 8) {
       kWidth = 16;
-      if (transformFP4(builder, dotSOps[0]->getLoc()).failed()) {
+      if (transformFP4mn(builder, dotSOps[0]->getLoc()).failed()) {
         LDBG("Encountered failure when trying to execute the two ping pong "
              "cluster transformation");
         return;
