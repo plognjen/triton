@@ -736,9 +736,9 @@ void addAsyncCopyAliasScope(AliasAnalysisOpInterface directToLdsOp) {
 void addLocalLoadNoAliasScope(triton::gpu::LocalLoadOp localLoadOp,
                               AliasAnalysisOpInterface llLoadOp) {
   auto token = localLoadOp.getToken();
-  if (!token || !comesFromAsyncWait(token)) {
+  // TODO (alex) WA for wrong tokens
+  if (!token) // || !comesFromAsyncWait(token))
     return;
-  }
 
   return addLocalLoadNoAliasScope(llLoadOp);
 }

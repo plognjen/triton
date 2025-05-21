@@ -1229,8 +1229,6 @@ SmallVector<Value> Pingponger::genSplitAsyncCopy(OpBuilder &builder, Value v,
 LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   llvm::outs() << "PINGPONG!\n";
 
-  // Slice LocalLoads of scales
-
   builder.setInsertionPoint(dotSOps[0]);
 
   // ------- Split AsyncCopy
@@ -1239,13 +1237,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   if (slicedATokens.empty() || slicedBTokens.empty())
     return failure();
 
-  // ------ Adjust loop to new tokens
-  // forOp.getBody()->addArgument(slicedATokens[0].getType(), loc);
-  // forOp.getBody()->addArgument(slicedATokens[1].getType(), loc);
-  // forOp.getBody()->addArgument(slicedBTokens[0].getType(), loc);
-  // forOp.getBody()->addArgument(slicedBTokens[1].getType(), loc);
-
-  // Remove the old AsyncWait
+  // ------ Remove the old AsyncWait
   auto oldAsyncWait = asyncWaitOps[0];
   SmallVector<int64_t> tokenArgIds;
   SmallVector<Value> initialTokens;
@@ -1255,13 +1247,15 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
       return failure();
     }
     tokenArgIds.push_back(blockArg.getArgNumber());
-    initialTokens.push_back(forOp.getInitArgs()[blockArg.getArgNumber()]);
+    initialTokens.push_back(forOp.getInitArgs()[blockArg.getArgNumber() - 1]);
   }
 
-  // OpBuilder beforeFor(forOp);
-  // beforeFor.create<ttg::AsyncWaitOp>(loc, initialTokens);
+  OpBuilder beforeFor(forOp);
+  auto waitBeforeLoop =
+      beforeFor.create<ttg::AsyncWaitOp>(loc, initialTokens, 0);
 
-  // Patch initial args, first look for existing token and duplicate
+  // -------- Patch initial loop args with the token from the wait before the
+  // loop
   Value foundToken;
   for (auto initialArg : forOp.getInitArgs()) {
     if (initialArg.getType() == slicedATokens[0].getType()) {
@@ -1269,14 +1263,8 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
     }
   }
 
-  // Cleanup old AsyncWait, we just replace it with one of its operands and will
-  // update each LocalLoad later
-  asyncWaitOps[0].getRetToken().replaceAllUsesWith(
-      Value(forOp.getBody()->getArgument(tokenArgIds.front())));
-  asyncWaitOps[0]->erase();
-
   SmallVector<Value> initArgs(forOp.getInitArgs());
-  SmallVector<Value> newArgs(6, foundToken);
+  SmallVector<Value> newArgs(6, waitBeforeLoop);
   // forOp.getInitArgsMutable().append(newArgs);
   unsigned startIndex = forOp.getBody()->getNumArguments();
   auto newBlockArgs = addIterArgsToLoop(builder, forOp, newArgs);
@@ -1292,7 +1280,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   Value loopCarriedTokensScaleA = forOp.getBody()->getArgument(startIndex + 4);
   Value loopCarriedTokensScaleB = forOp.getBody()->getArgument(startIndex + 5);
 
-  // Now patch the yield to pass the tokens of all sliced loads
+  // ----------------- Patch the yield to pass the tokens of all sliced loads
   auto yieldOp = forOp.getBody()->getTerminator();
   SmallVector<Value> operands(yieldOp->getOperands());
   operands.append(slicedATokens.begin(), slicedATokens.end());
@@ -1305,6 +1293,12 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   OpBuilder builder2(yieldOp);
   builder2.create<scf::YieldOp>(yieldOp->getLoc(), operands);
   yieldOp->erase();
+
+  // ------ Cleanup old AsyncWait, we just replace it with one of its operands
+  // and will update each LocalLoad later
+  asyncWaitOps[0].getRetToken().replaceAllUsesWith(
+      Value(forOp.getBody()->getArgument(tokenArgIds.front())));
+  asyncWaitOps[0]->erase();
 
   // ------- Slice scaleA
   auto aScale = dotSOps[0].getAScale();
@@ -1374,10 +1368,13 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
       sliceScaleB2, dotSOps[0].getAElemTypeAttr(),
       dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
 
+  // -----------------------------------------------------------
   // Schedule values
+  // -----------------------------------------------------------
   builder.setInsertionPointAfter(dotSOps[0]);
   updateOpInsertion(dotSOps[0]);
 
+  // For AsyncCopies we always need to move the AsyncCopy and the CommitGroup
   // A0
   appendOp(slicedATokens[0].getDefiningOp()->getOperand(0).getDefiningOp());
   appendOp(slicedATokens[0].getDefiningOp());
@@ -1412,7 +1409,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendOp(sliceOperandB2.getDefiningOp());
   appendOp(sliceScaleB2.getDefiningOp());
 
-  // TODO async wait A1
+  // AsyncWait A1
   appendOp(
       builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceA[1], 0));
 
@@ -1428,7 +1425,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendOp(sliceOperandA2.getDefiningOp());
   appendOp(sliceScaleA2.getDefiningOp());
 
-  // TODO asyn wait A0, B0, SA, SB
+  // AsyncWait A0, B0, SA, SB
   appendOp(builder.create<ttg::AsyncWaitOp>(
       loc,
       ValueRange{loopCarriedTokensSliceA[0], loopCarriedTokensSliceB[0],
