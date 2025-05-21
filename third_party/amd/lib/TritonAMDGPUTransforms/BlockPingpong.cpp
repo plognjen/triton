@@ -8,6 +8,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -100,6 +101,8 @@ private:
   SmallVector<Operation *> genClusterBarrier(OpBuilder &builder, Location loc);
   LogicalResult genScaleSlice(OpBuilder &builder, Value v, unsigned numSlices,
                               int sliceDim);
+  LogicalResult genOperandSlice(OpBuilder &builder, Value v, unsigned numSlices,
+                                int sliceDim);
   void appendClusterBarrier(OpBuilder &builder, Location loc);
   void prependClusterBarrier(OpBuilder &builder, Location loc);
   void appendOpWithPrio(OpBuilder &builder, Operation *Op, Location loc);
@@ -1142,15 +1145,12 @@ LogicalResult Pingponger::genScaleSlice(OpBuilder &builder, Value v,
   int64_t sliceDimSize = shape[sliceDim];
   int64_t sliceWidth = sliceDimSize / numSlices;
   shape[sliceDim] = sliceWidth;
-  // if (sliceWidth < 16)
-  //   return failure();
-  // auto dotOperandEnc = ttg::DotOperandEncodingAttr::get(
-  //     builder.getContext(), opIdx, dotEncoding, kWidth);
 
-  auto llEnc = cast<ttg::LinearEncodingAttr>(srcTy.getEncoding());
-  auto newLLEnc = triton::gpu::LinearEncodingAttr::get(builder.getContext(),
-                                                       llEnc.getLinearLayout());
-  auto sliceType = RankedTensorType::get(shape, elementType, newLLEnc);
+  // auto llEnc = cast<ttg::LinearEncodingAttr>(srcTy.getEncoding());
+  // auto newLLEnc = triton::gpu::LinearEncodingAttr::get(builder.getContext(),
+  //                                                      llEnc.getLinearLayout());
+  auto sliceType =
+      RankedTensorType::get(shape, elementType, srcTy.getEncoding());
 
   auto subviewDescType = ttg::MemDescType::get(
       shape, elementType, type.getEncoding(), type.getMemorySpace(),
@@ -1187,26 +1187,101 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   // Slice LocalLoads of scales
 
   builder.setInsertionPoint(dotSOps[0]);
-  auto aScale = dotSOps[0].getAScale();
 
+  // ------- Slice scaleA
+  auto aScale = dotSOps[0].getAScale();
   if (failed(genScaleSlice(builder, aScale, 2, 0))) {
     return failure();
   }
   Value sliceScaleA1 = loadSliceOps[0][0]->getResult(0);
   Value sliceScaleA2 = loadSliceOps[0][1]->getResult(0);
-  auto concatScaleA = builder.create<triton::amdgpu::ConcatOp>(
-      loc, aScale.getType(), ValueRange{sliceScaleA1, sliceScaleA2});
-  dotSOps[0].getAScaleMutable().assign(concatScaleA);
 
+  // ------- Slice scaleB
   auto bScale = dotSOps[0].getBScale();
   if (failed(genScaleSlice(builder, bScale, 2, 0))) {
     return failure();
   }
   Value sliceScaleB1 = loadSliceOps[1][0]->getResult(0);
   Value sliceScaleB2 = loadSliceOps[1][1]->getResult(0);
-  auto concatScaleB = builder.create<triton::amdgpu::ConcatOp>(
-      loc, aScale.getType(), ValueRange{sliceScaleB1, sliceScaleB2});
-  dotSOps[0].getBScaleMutable().assign(concatScaleA);
+
+  // ------- Slice A
+  auto aOperand = dotSOps[0].getA();
+  if (failed(genScaleSlice(builder, aOperand, 2, 0))) {
+    return failure();
+  }
+  Value sliceOperandA1 = loadSliceOps[2][0]->getResult(0);
+  Value sliceOperandA2 = loadSliceOps[2][1]->getResult(0);
+
+  // ------- Slice B
+  auto bOperand = dotSOps[0].getB();
+  if (failed(genScaleSlice(builder, bOperand, 2, 1))) {
+    return failure();
+  }
+  Value sliceOperandB1 = loadSliceOps[3][0]->getResult(0);
+  Value sliceOperandB2 = loadSliceOps[3][1]->getResult(0);
+
+  // -------- Slice Accumualator into 4 pieces
+  Value acc = dotSOps[0].getC();
+  auto accTy = cast<RankedTensorType>(acc.getType());
+  auto sliceAccTy = RankedTensorType::get({128, 128}, accTy.getElementType(),
+                                          accTy.getEncoding());
+  auto slicedAcc0 = builder.create<triton::amdgpu::ExtractSliceOp>(
+      loc, sliceAccTy, acc, builder.getDenseI64ArrayAttr({0, 0}));
+  auto slicedAcc1 = builder.create<triton::amdgpu::ExtractSliceOp>(
+      loc, sliceAccTy, acc, builder.getDenseI64ArrayAttr({0, 128}));
+  auto slicedAcc2 = builder.create<triton::amdgpu::ExtractSliceOp>(
+      loc, sliceAccTy, acc, builder.getDenseI64ArrayAttr({128, 0}));
+  auto slicedAcc3 = builder.create<triton::amdgpu::ExtractSliceOp>(
+      loc, sliceAccTy, acc, builder.getDenseI64ArrayAttr({128, 128}));
+
+  // --------- Slice dot
+
+  auto scliedResTy = sliceAccTy;
+  Value dot1 = builder.create<triton::DotScaledOp>(
+      loc, sliceAccTy, sliceOperandA1, sliceOperandB1, slicedAcc0, sliceScaleA1,
+      sliceScaleB1, dotSOps[0].getAElemTypeAttr(),
+      dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
+  Value dot2 = builder.create<triton::DotScaledOp>(
+      loc, sliceAccTy, sliceOperandA1, sliceOperandB2, slicedAcc1, sliceScaleA1,
+      sliceScaleB2, dotSOps[0].getAElemTypeAttr(),
+      dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
+  Value dot3 = builder.create<triton::DotScaledOp>(
+      loc, sliceAccTy, sliceOperandA2, sliceOperandB1, slicedAcc2, sliceScaleA2,
+      sliceScaleB1, dotSOps[0].getAElemTypeAttr(),
+      dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
+  Value dot4 = builder.create<triton::DotScaledOp>(
+      loc, sliceAccTy, sliceOperandA2, sliceOperandB2, slicedAcc3, sliceScaleA2,
+      sliceScaleB2, dotSOps[0].getAElemTypeAttr(),
+      dotSOps[0].getBElemTypeAttr(), builder.getBoolAttr(false));
+
+  // Concat dot results
+  auto dotConcat = builder.create<triton::amdgpu::ConcatOp>(
+      loc, accTy, ValueRange{dot1, dot2, dot3, dot4});
+  dotSOps[0]->replaceAllUsesWith(dotConcat);
+  dotSOps[0].erase();
+
+  //  ::mlir::triton::ScaleDotElemTypeAttr a_elem_type,
+  //  ::mlir::triton::ScaleDotElemTypeAttr b_elem_type, ::mlir::BoolAttr
+  //  fastMath, ::mlir::BoolAttr lhs_k_pack = nullptr, ::mlir::BoolAttr
+  //  rhs_k_pack = nullptr);
+
+  // --------- Debug concat everything back together
+  // auto concatScaleA = builder.create<triton::amdgpu::ConcatOp>(
+  //     loc, aScale.getType(), ValueRange{sliceScaleA1, sliceScaleA2});
+  // dotSOps[0].getAScaleMutable().assign(concatScaleA);
+  // auto concatScaleB = builder.create<triton::amdgpu::ConcatOp>(
+  //     loc, bScale.getType(), ValueRange{sliceScaleB1, sliceScaleB2});
+  // dotSOps[0].getBScaleMutable().assign(concatScaleB);
+  // auto concatOperandA = builder.create<triton::amdgpu::ConcatOp>(
+  //     loc, aOperand.getType(), ValueRange{sliceOperandA1, sliceOperandA2});
+  // dotSOps[0].getAMutable().assign(concatOperandA);
+  // auto concatOperandB = builder.create<triton::amdgpu::ConcatOp>(
+  //     loc, bOperand.getType(), ValueRange{sliceOperandB1, sliceOperandB2});
+  // dotSOps[0].getBMutable().assign(concatOperandB);
+  // auto accConcat = builder.create<triton::amdgpu::ConcatOp>(
+  //     loc, accTy, ValueRange{slicedAcc0, slicedAcc1, slicedAcc2,
+  //     slicedAcc3});
+  // dotSOps[0].getCMutable().assign(accConcat);
 
   return success(0);
 
