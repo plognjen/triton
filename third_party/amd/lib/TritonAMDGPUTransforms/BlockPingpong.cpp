@@ -1286,9 +1286,11 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   operands.append(slicedATokens.begin(), slicedATokens.end());
   operands.append(slicedBTokens.begin(), slicedBTokens.end());
   // ScaleA (commit group)
-  operands.push_back(asyncCopyOps[0]->getUsers().begin()->getResult(0));
+  Value scaleACommit = asyncCommitOps[0];
+  operands.push_back(scaleACommit);
   // ScaleB (commit group)
-  operands.push_back(asyncCopyOps[1]->getUsers().begin()->getResult(0));
+  Value scaleBCommit = asyncCommitOps[1];
+  operands.push_back(scaleBCommit);
 
   OpBuilder builder2(yieldOp);
   builder2.create<scf::YieldOp>(yieldOp->getLoc(), operands);
@@ -1418,18 +1420,20 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   // TODO barrier
 
   // A1
-  appendOp(slicedATokens[0].getDefiningOp()->getOperand(0).getDefiningOp());
-  appendOp(slicedATokens[0].getDefiningOp());
+  appendOp(slicedATokens[1].getDefiningOp()->getOperand(0).getDefiningOp());
+  appendOp(slicedATokens[1].getDefiningOp());
 
   // Local loads A1, SA1
   appendOp(sliceOperandA2.getDefiningOp());
   appendOp(sliceScaleA2.getDefiningOp());
 
-  // AsyncWait A0, B0, SA, SB
+  // AsyncWait A0, B0, SA, SB, note we do *not* use the loop carried tokens here
   appendOp(builder.create<ttg::AsyncWaitOp>(
       loc,
-      ValueRange{loopCarriedTokensSliceA[0], loopCarriedTokensSliceB[0],
-                 loopCarriedTokensScaleA, loopCarriedTokensScaleB},
+      // ValueRange{loopCarriedTokensSliceA[0], loopCarriedTokensSliceB[0],
+      //            loopCarriedTokensScaleA, loopCarriedTokensScaleB},
+      ValueRange{slicedATokens[0], slicedBTokens[0], scaleACommit,
+                 scaleBCommit},
       0));
 
   appendOp(dot3.getDefiningOp());
