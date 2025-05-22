@@ -458,9 +458,14 @@ public:
                            Float8E4M3FNType, Float8E5M2Type>(aElemTy);
     bool isTransposed =
         isChainDotHead(dotOp) || isChainDotTail(dotOp) || !isFP8;
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
+        tilesPerWarp,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
 
     Type mfmaAccType;
@@ -660,8 +665,13 @@ public:
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < mfmaWarpsPerCTA.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, mfmaWarpsPerCTA,
+        tilesPerWarp,
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
 
     auto newRetType = RankedTensorType::get(
@@ -818,8 +828,13 @@ public:
 
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
+    SmallVector<unsigned> tilesPerWarp;
+    for (int i = 0; i < warpsPerTile.size(); i++) {
+      tilesPerWarp.push_back(2);
+    }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
+        tilesPerWarp,
         /*instrShape=*/mDim, nDim, /*isTransposed=*/true, ctaLayout);
 
     auto newRetType =
@@ -866,9 +881,6 @@ public:
       if (bothScalesAbsent)
         return Value();
 
-      LinearLayout::BasesT scaleBases = dotLL.getBases();
-      auto &warpBases = scaleBases[kWarp];
-
       SmallVector<int64_t> shape;
       if (!scale) {
         int64_t nonKDim = idx == 0 ? valShape[0] : valShape[1];
@@ -880,10 +892,15 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
 
-      LinearLayout newLL =
-          chooseScaledMfmaScaleLayout(ctx, idx, warpBases, shape, mDim);
+      LinearLayout newLL = chooseScaledMfmaScaleLayout(
+          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile);
 
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
+
+      // auto CTALayout = ttg::getCTALayout(newScaleEncoding);
+      // auto blockedEncoding = BlockedEncodingAttr::get(
+      //     ctx, {1, 4}, {32, 2}, {8, 1}, {1, 0}, ctaLayout);
+
       // Scale's data type is always i8
       auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
 
