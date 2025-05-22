@@ -18,8 +18,7 @@ bool filterAsyncLocalLoadsDeppendencies(Operation *op1, Operation *op2) {
     if (!localLoad)
       return false;
     Value token = localLoad.getToken();
-    // TODO (alex) WA for wrong tokens
-    if (!token) // || !comesFromAsyncWait(token))
+    if (!token || !comesFromAsyncWait(token))
       return false;
     return true;
   };
