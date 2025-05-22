@@ -1047,7 +1047,6 @@ LogicalResult Pingponger::transformFAv3(OpBuilder &builder, Location loc) {
 }
 
 LogicalResult Pingponger::transformFP4s(OpBuilder &builder, Location loc) {
-  llvm::outs() << "PINGPONG S!\n";
   // FIXME: support nonscale.
   if (lLoadOps.size() != 4)
     return failure();
@@ -1227,7 +1226,6 @@ SmallVector<Value> Pingponger::genSplitAsyncCopy(OpBuilder &builder, Value v,
 }
 
 LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
-  llvm::outs() << "PINGPONG!\n";
 
   builder.setInsertionPoint(dotSOps[0]);
 
@@ -1376,7 +1374,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
         lastAsyncWaitToken);
   };
 
-  auto appendAsyncWait = [&](ttg::AsyncWaitOp asyncWait) {
+  auto appendAsyncWaitOp = [&](ttg::AsyncWaitOp asyncWait) {
     appendOp(asyncWait);
     lastAsyncWaitToken = asyncWait;
   };
@@ -1403,7 +1401,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendLocalLoadOp(sliceScaleA1.getDefiningOp());
   appendLocalLoadOp(sliceScaleB1.getDefiningOp());
   // TODO add async wait B1
-  appendAsyncWait(
+  appendAsyncWaitOp(
       builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceB[1], 0));
 
   appendOp(dot1.getDefiningOp());
@@ -1417,7 +1415,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendLocalLoadOp(sliceScaleB2.getDefiningOp());
 
   // AsyncWait A1
-  appendAsyncWait(
+  appendAsyncWaitOp(
       builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceA[1], 0));
 
   appendOp(dot2.getDefiningOp());
@@ -1433,7 +1431,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendLocalLoadOp(sliceScaleA2.getDefiningOp());
 
   // AsyncWait A0, B0, SA, SB, note we do *not* use the loop carried tokens here
-  appendAsyncWait(builder.create<ttg::AsyncWaitOp>(
+  appendAsyncWaitOp(builder.create<ttg::AsyncWaitOp>(
       loc,
       // ValueRange{loopCarriedTokensSliceA[0], loopCarriedTokensSliceB[0],
       //            loopCarriedTokensScaleA, loopCarriedTokensScaleB},
