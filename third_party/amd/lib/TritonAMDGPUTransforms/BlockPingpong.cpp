@@ -1254,6 +1254,10 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   auto waitBeforeLoop =
       beforeFor.create<ttg::AsyncWaitOp>(loc, initialTokens, 0);
 
+  // --------
+  // Overall we add 7 new tokens to the loop. 2x OperandA, 2x Operand B, 1x
+  // ScaleA, 1x ScaleB, 1x for last AsyncWait in loop
+
   // -------- Patch initial loop args with the token from the wait before the
   // loop
   Value foundToken;
@@ -1264,7 +1268,7 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   }
 
   SmallVector<Value> initArgs(forOp.getInitArgs());
-  SmallVector<Value> newArgs(6, waitBeforeLoop);
+  SmallVector<Value> newArgs(7, waitBeforeLoop);
   // forOp.getInitArgsMutable().append(newArgs);
   unsigned startIndex = forOp.getBody()->getNumArguments();
   auto newBlockArgs = addIterArgsToLoop(builder, forOp, newArgs);
@@ -1279,22 +1283,8 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   };
   Value loopCarriedTokensScaleA = forOp.getBody()->getArgument(startIndex + 4);
   Value loopCarriedTokensScaleB = forOp.getBody()->getArgument(startIndex + 5);
-
-  // ----------------- Patch the yield to pass the tokens of all sliced loads
-  auto yieldOp = forOp.getBody()->getTerminator();
-  SmallVector<Value> operands(yieldOp->getOperands());
-  operands.append(slicedATokens.begin(), slicedATokens.end());
-  operands.append(slicedBTokens.begin(), slicedBTokens.end());
-  // ScaleA (commit group)
-  Value scaleACommit = asyncCommitOps[0];
-  operands.push_back(scaleACommit);
-  // ScaleB (commit group)
-  Value scaleBCommit = asyncCommitOps[1];
-  operands.push_back(scaleBCommit);
-
-  OpBuilder builder2(yieldOp);
-  builder2.create<scf::YieldOp>(yieldOp->getLoc(), operands);
-  yieldOp->erase();
+  Value loopCarriedAsyncWaitToken =
+      forOp.getBody()->getArgument(startIndex + 6);
 
   // ------ Cleanup old AsyncWait, we just replace it with one of its operands
   // and will update each LocalLoad later
@@ -1376,6 +1366,21 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   builder.setInsertionPointAfter(dotSOps[0]);
   updateOpInsertion(dotSOps[0]);
 
+  Value scaleACommit = asyncCommitOps[0];
+  Value scaleBCommit = asyncCommitOps[1];
+  Value lastAsyncWaitToken = loopCarriedAsyncWaitToken;
+
+  auto appendLocalLoadOp = [&](Operation *localLoad) {
+    appendOp(localLoad);
+    cast<ttg::LocalLoadOp>(localLoad).getTokenMutable().assign(
+        lastAsyncWaitToken);
+  };
+
+  auto appendAsyncWait = [&](ttg::AsyncWaitOp asyncWait) {
+    appendOp(asyncWait);
+    lastAsyncWaitToken = asyncWait;
+  };
+
   // For AsyncCopies we always need to move the AsyncCopy and the CommitGroup
   // A0
   appendOp(slicedATokens[0].getDefiningOp()->getOperand(0).getDefiningOp());
@@ -1393,12 +1398,12 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
     appendOp(user);
 
   // Local Loads A0, B0, SA0, SB0
-  appendOp(sliceOperandA1.getDefiningOp());
-  appendOp(sliceOperandB1.getDefiningOp());
-  appendOp(sliceScaleA1.getDefiningOp());
-  appendOp(sliceScaleB1.getDefiningOp());
+  appendLocalLoadOp(sliceOperandA1.getDefiningOp());
+  appendLocalLoadOp(sliceOperandB1.getDefiningOp());
+  appendLocalLoadOp(sliceScaleA1.getDefiningOp());
+  appendLocalLoadOp(sliceScaleB1.getDefiningOp());
   // TODO add async wait B1
-  appendOp(
+  appendAsyncWait(
       builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceB[1], 0));
 
   appendOp(dot1.getDefiningOp());
@@ -1408,11 +1413,11 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendOp(slicedBTokens[1].getDefiningOp());
 
   // Local Loads B1, SB1
-  appendOp(sliceOperandB2.getDefiningOp());
-  appendOp(sliceScaleB2.getDefiningOp());
+  appendLocalLoadOp(sliceOperandB2.getDefiningOp());
+  appendLocalLoadOp(sliceScaleB2.getDefiningOp());
 
   // AsyncWait A1
-  appendOp(
+  appendAsyncWait(
       builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceA[1], 0));
 
   appendOp(dot2.getDefiningOp());
@@ -1424,11 +1429,11 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendOp(slicedATokens[1].getDefiningOp());
 
   // Local loads A1, SA1
-  appendOp(sliceOperandA2.getDefiningOp());
-  appendOp(sliceScaleA2.getDefiningOp());
+  appendLocalLoadOp(sliceOperandA2.getDefiningOp());
+  appendLocalLoadOp(sliceScaleA2.getDefiningOp());
 
   // AsyncWait A0, B0, SA, SB, note we do *not* use the loop carried tokens here
-  appendOp(builder.create<ttg::AsyncWaitOp>(
+  appendAsyncWait(builder.create<ttg::AsyncWaitOp>(
       loc,
       // ValueRange{loopCarriedTokensSliceA[0], loopCarriedTokensSliceB[0],
       //            loopCarriedTokensScaleA, loopCarriedTokensScaleB},
@@ -1444,6 +1449,22 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
       loc, accTy, ValueRange{dot1, dot2, dot3, dot4});
   dotSOps[0]->replaceAllUsesWith(dotConcat);
   dotSOps[0].erase();
+
+  // ----------------- Patch the yield to pass the tokens of all sliced loads
+  // and the last AsyncWait
+  auto yieldOp = forOp.getBody()->getTerminator();
+  SmallVector<Value> operands(yieldOp->getOperands());
+  operands.append(slicedATokens.begin(), slicedATokens.end());
+  operands.append(slicedBTokens.begin(), slicedBTokens.end());
+  // ScaleA (commit group)
+  operands.push_back(scaleACommit);
+  // ScaleB (commit group)
+  operands.push_back(scaleBCommit);
+  operands.push_back(lastAsyncWaitToken);
+
+  OpBuilder builder2(yieldOp);
+  builder2.create<scf::YieldOp>(yieldOp->getLoc(), operands);
+  yieldOp->erase();
 
   // Cleanup old AsyncCopies, we just rewrite the token to use the first slice
   auto commitA = *asyncCopyOps[2]->getUsers().begin();
