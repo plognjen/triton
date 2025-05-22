@@ -830,7 +830,7 @@ public:
     // for global store instructions.
     SmallVector<unsigned> tilesPerWarp;
     for (int i = 0; i < warpsPerTile.size(); i++) {
-      tilesPerWarp.push_back(1);
+      tilesPerWarp.push_back(2);
     }
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         ctx, /*versionMajor=*/mfmaVersion, /*versionMinor=*/0, warpsPerTile,
