@@ -28,6 +28,9 @@ def TritonAMDGPUStreamPipeline : Pass<"tritonamdgpu-stream-pipeline", "mlir::Mod
     Option<"useAsyncCopy", "use_async_copy",
            "bool", /*default*/"false",
            "Use AsyncCopyGlobalToLocal to directly load to shared memory">,
+    Option<"bypassLDSForScales", "bypass-lds-for-scales",
+           "bool", /*default*/"false",
+           "bypassLDSForScales">,
   ];
 }
 
@@ -52,7 +55,11 @@ def TritonAMDGPUAccelerateMatmul : Pass<"tritonamdgpu-accelerate-matmul", "mlir:
            "enforce matrix instruction MN size">,
     Option<"kPack", "kPack",
            "int32_t", /*default*/"1",
-           "KWidth / kBase">
+           "KWidth / kBase">,
+    Option<"preshuffleScales", "preshuffle-scales",
+           "bool", /*default*/"false",
+           "preshuffle scaledDot scales">
+
   ];
 }
 
