@@ -56,9 +56,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
   ADD_PASS_WRAPPER_2("add_optimize_lds_usage",
                      mlir::triton::AMD::createOptimizeLDSUsagePass,
                      const std::string &, int32_t);
-  ADD_PASS_WRAPPER_3("add_accelerate_matmul",
+  ADD_PASS_WRAPPER_4("add_accelerate_matmul",
                      mlir::createTritonAMDGPUAccelerateMatmulPass,
-                     const std::string, int, int);
+                     const std::string, int, int, bool);
   ADD_PASS_WRAPPER_0("add_optimize_epilogue",
                      mlir::createTritonAMDGPUOptimizeEpiloguePass);
   m.def("add_hoist_layout_conversions", [](mlir::PassManager &pm) {
@@ -78,9 +78,9 @@ void init_triton_amd_passes_ttgpuir(py::module &&m) {
                      mlir::createTritonAMDGPUFoldTrueCmpIPass);
   ADD_PASS_WRAPPER_2("add_block_pingpong",
                      mlir::createTritonAMDGPUBlockPingpongPass, int32_t, bool);
-  ADD_PASS_WRAPPER_4("add_stream_pipeline",
+  ADD_PASS_WRAPPER_5("add_stream_pipeline",
                      mlir::createTritonAMDGPUStreamPipelinePass, int, int, int,
-                     bool);
+                     bool, bool);
   ADD_PASS_WRAPPER_1("add_coalesce_async_copy",
                      mlir::createTritonAMDGPUCoalesceAsyncCopyPass,
                      std::string);

@@ -122,10 +122,10 @@ class StreamPipeliner {
 public:
   StreamPipeliner(scf::ForOp _forOp, int _numStages, int _globalPrefetch,
                   int _localPrefetch, bool _useAsyncCopy,
-                  bool _useF16BlockPingpong)
+                  bool _useF16BlockPingpong, bool _bypassLDSForScales)
       : forOp(_forOp), numStages(_numStages), numBuffers(1),
         useAsyncCopy(_useAsyncCopy), useF16BlockPingpong(_useF16BlockPingpong),
-        schedule(numStages),
+        bypassLDSForScales(_bypassLDSForScales), schedule(numStages),
         axisInfoAnalysis(forOp->getParentOfType<ModuleOp>()) {
     int lastStage = numStages - 1;
     stages[SCHED_GLOBAL_LOAD] = 0;
@@ -177,6 +177,8 @@ private:
 
   // Directly store to shared memory with AsyncCopy when pipelining tt.loads
   bool useAsyncCopy;
+
+  bool bypassLDSForScales;
 
   // Whether or not we are intend to ping-pong.
   bool useF16BlockPingpong;
@@ -645,10 +647,28 @@ void StreamPipeliner::assignMemoryLayouts() {
     LDBG("assign memory layouts (width=" << width << ") for load " << loadOp);
     LoadInfo loadInfo;
     if (isa<tt::DotOpInterface>(use)) {
-      // Only use shared memory when feeding into a dot op.
       loadInfo.usedByDot = true;
+
+      // Terrible way to determine if op is scaled tensor. Fix this with proper
+      // static analysis.
+      bool bypassLDS = width < 32;
+      if (bypassLDSForScales) {
+        if (auto scaledDot = dyn_cast<tt::DotScaledOp>(use)) {
+          auto tensorShape = tensorTy.getShape();
+          auto scaleA = scaledDot.getAScale();
+          auto scaleB = scaledDot.getBScale();
+          auto scaleATy = dyn_cast<RankedTensorType>(scaleA.getType());
+          auto scaleBTy = dyn_cast<RankedTensorType>(scaleB.getType());
+          auto scaleAShape = scaleATy.getShape();
+          auto scaleBShape = scaleBTy.getShape();
+          bypassLDS = bypassLDS || (tensorShape == scaleAShape) ||
+                      (tensorShape == scaleBShape);
+        }
+      }
+
+      // Only use shared memory when feeding into a dot op.
       // If the max continugous bits we can read is < 32, buffer in registers.
-      if (width >= 32) {
+      if (!bypassLDS) {
         loadInfo.sharedEncoding =
             getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
       }
@@ -1044,13 +1064,14 @@ void labelLoadOpsForTritonDot(scf::ForOp forOp) {
 struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
   PipelinePass() = default;
   PipelinePass(int32_t _numStages, int32_t _globalPrefetch,
-               int32_t _localPrefetch, bool _useAsyncCopy) {
+               int32_t _localPrefetch, bool _useAsyncCopy, bool _bypassLDSForScales) {
     this->numStages = _numStages;
 
     this->globalPrefetch = _globalPrefetch;
     this->localPrefetch = _localPrefetch;
 
     this->useAsyncCopy = _useAsyncCopy;
+    this->bypassLDSForScales = _bypassLDSForScales;
   }
 
   void runOnOperation() override {
@@ -1092,7 +1113,7 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
       } else {
         StreamPipeliner sp(forOp, tt::getNumStagesOrDefault(forOp, numStages),
                            globalPrefetch, localPrefetch, useAsyncCopy,
-                           useF16BlockPingpong);
+                           useF16BlockPingpong, bypassLDSForScales);
         (void)sp.pipelineLoop();
       }
     }
@@ -1109,8 +1130,11 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
 };
 } // namespace
 
-std::unique_ptr<Pass> mlir::createTritonAMDGPUStreamPipelinePass(
-    int numStages, int globalPrefetch, int localPrefetch, bool useAsyncCopy) {
+std::unique_ptr<Pass>
+mlir::createTritonAMDGPUStreamPipelinePass(int numStages, int globalPrefetch,
+                                           int localPrefetch, bool useAsyncCopy,
+                                           bool bypassLDSForScales) {
   return std::make_unique<PipelinePass>(numStages, globalPrefetch,
-                                        localPrefetch, useAsyncCopy);
+                                        localPrefetch, useAsyncCopy,
+                                        bypassLDSForScales);
 }
