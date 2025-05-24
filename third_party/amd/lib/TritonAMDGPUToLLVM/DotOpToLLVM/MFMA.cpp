@@ -468,6 +468,12 @@ struct DotOpMFMAConversionHelper {
     int numVecInKBase = kRepInKWidth * kWidth / kBase;
     ValueTable dotOpVals;
 
+    // if (kBase == 1) {
+    //   SmallVector<int32_t> elemsSigned{1, 1, 1, 1};
+    //   const std::string prefix = "aaaa";
+    //   rewriter.create<PrintOp>(loc, prefix, false, elems, elemsSigned);
+    // }
+
     SmallVector<int64_t> bounds = {batch, nonKRep, numVecInKBase, kBase};
     SmallVector<int64_t> strides = computeStrides(bounds);
     for (int b = 0; b < batch; ++b) {
@@ -483,8 +489,39 @@ struct DotOpMFMAConversionHelper {
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kBase; ++k) {
             auto index = linearize({b, nonK, kBaseVec, k}, strides);
-            rawElems =
-                tb.insert_element(ty, rawElems, elems[index], tb.i32_val(k));
+            if (kBase == 1) {
+              if (nonK == 0 && kBaseVec == 0) {
+                llvm::outs() << elems.size() << "\n";
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[0], tb.i32_val(k));
+              } else if (nonK == 0 && kBaseVec == 1) {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[2], tb.i32_val(k));
+              } else if (nonK == 1 && kBaseVec == 0) {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[1], tb.i32_val(k));
+              } else if(nonK == 1 && kBaseVec == 1) {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[3], tb.i32_val(k));
+              } else if (nonK == 2 && kBaseVec == 0) {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[4], tb.i32_val(k));
+              } else if (nonK == 2 && kBaseVec == 1) {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[6], tb.i32_val(k));
+              } else if (nonK == 3 && kBaseVec == 0) {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[5], tb.i32_val(k));
+              } else {
+                rawElems =
+                    tb.insert_element(ty, rawElems, elems[7], tb.i32_val(k));
+              }
+            } else {
+              rawElems =
+                  tb.insert_element(ty, rawElems, elems[index], tb.i32_val(k));
+            }
+              // rawElems =
+              //     tb.insert_element(ty, rawElems, elems[index], tb.i32_val(k));
           }
 
           // Step 2: process rawElems based on element type
@@ -665,6 +702,11 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           loadedAScale, numRepB, numRepM, numRepK, scaleKWidth, scaleKBase,
           aScaleTensorTy.getElementType(), allowXF32, /*preserveBF16=*/false,
           isAScaleConstant);
+
+      // SmallVector<int32_t> elemsSigned{1};
+      // const std::string prefix = "aaaa ";
+      // rewriter.create<PrintOp>(loc, prefix, false, operandAScale[{0, 0, 1}],
+      //                          elemsSigned);
 
       auto bScaleTensorTy = cast<RankedTensorType>(bScale.getType());
       operandBScale = getValuesFromDotOperandLayoutStruct(
