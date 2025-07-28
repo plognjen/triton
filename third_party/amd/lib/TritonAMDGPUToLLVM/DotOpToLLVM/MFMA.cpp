@@ -676,8 +676,8 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         isBScaleConstant ? 1 : std::min(4, static_cast<int>(numRepK));
 
     assert(scaleAKBase % akPackedVals == 0 && scaleBKBase % bkPackedVals == 0);
-    int nonAKPackedVals = scaleAKBase / akPackedVals;
-    int nonBKPackedVals = scaleBKBase / bkPackedVals;
+    int aNonKPackedVals = scaleAKBase / akPackedVals;
+    int bNonKPackedVals = scaleBKBase / bkPackedVals;
 
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepK, aKWidth, aKBase,
@@ -764,10 +764,10 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                 int bkScale = k / bkPackedVals;
                 int opSelA = 0, opSelB = 0;
 
-                int mScale = m / nonAKPackedVals;
-                int nScale = n / nonBKPackedVals;
-                opSelA = (m * numRepK + k) % (nonAKPackedVals * akPackedVals);
-                opSelB = (n * numRepK + k) % (nonBKPackedVals * bkPackedVals);
+                int mScale = m / aNonKPackedVals;
+                int nScale = n / bNonKPackedVals;
+                opSelA = (m * numRepK + k) % (aNonKPackedVals * akPackedVals);
+                opSelB = (n * numRepK + k) % (bNonKPackedVals * bkPackedVals);
 
                 if (mfmaLayout.getIsTransposed()) {
                   acc = generateScaledMFMAOp(

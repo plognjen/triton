@@ -810,6 +810,9 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
   // layout's out-size is smaller than the shape, we follow this order to
   // extend each dimension to match the shape. After that, we can transpose
   // to match the standard output order.
+  auto finalLay = combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape).transposeOuts(outDimNames);
+  llvm::outs() << finalLay << "\n";
+
   return combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape)
       .transposeOuts(outDimNames);
 }
