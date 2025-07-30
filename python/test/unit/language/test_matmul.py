@@ -607,6 +607,8 @@ def test_preshuffle_scale_mxfp_cdna4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, mfma_no
     #
     # Each thread holds one scale per MFMA operation. We pack the 4 scale values (for 4 different MFMA ops)
     # next to each other in memory.
+    # Note that the examples below are not the only efficient methods for scale packing.
+    # We chose this approach for compatibility with other AMD frameworks and teams.
     #
     # Case 1: mfma_scaled_16x16x128
     #
