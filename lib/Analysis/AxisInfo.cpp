@@ -6,6 +6,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "triton/Tools/LayoutUtils.h"
 
 #include <numeric>
 
@@ -1217,7 +1218,9 @@ unsigned ModuleAxisInfoAnalysis::getContiguity(Value value) {
   if (auto ptrTy = dyn_cast<PointerType>(elemTy)) {
     elemTy = ptrTy.getPointeeType();
   }
-  return getContiguity(value, elemTy.getIntOrFloatBitWidth());
+  auto res = getContiguity(value, elemTy.getIntOrFloatBitWidth());
+  llvm::outs() << res << "\n";
+  return res;
 }
 
 unsigned ModuleAxisInfoAnalysis::getContiguity(Value offsetsValue,
@@ -1226,6 +1229,7 @@ unsigned ModuleAxisInfoAnalysis::getContiguity(Value offsetsValue,
   // the analysis to one dimension. We should determine contiguity on the
   // flattenOuts() layout
   auto tensorTy = cast<RankedTensorType>(offsetsValue.getType());
+  auto shape = tensorTy.getShape();
   auto linAttr = gpu::toLinearEncoding(tensorTy);
   auto order = linAttr.getOrder();
   unsigned align = getAlignment(offsetsValue, elementBitWidth);
@@ -1233,9 +1237,24 @@ unsigned ModuleAxisInfoAnalysis::getContiguity(Value offsetsValue,
   auto uniqueContigPerThread = linAttr.getContigPerThread();
   assert(order[0] < uniqueContigPerThread.size() &&
          "Unexpected uniqueContigPerThread size");
-  unsigned contiguity = uniqueContigPerThread[order[0]];
-  LDBG("getContiguity uniqueContigPerThread = " << contiguity);
-  contiguity = std::min(align, contiguity);
+  // unsigned contiguity = uniqueContigPerThread[order[0]];
+  // LDBG("getContiguity uniqueContigPerThread = " << contiguity);
+
+  auto ll = linAttr.toLinearLayout(shape);
+  auto ctaLayout = triton::gpu::getCTALayout(tensorTy.getEncoding());
+  // Dummy shared layout that emulates global memory so we can use
+  // largestVectorisation utility.
+  auto sharedEncoding = triton::gpu::SwizzledSharedEncodingAttr::get(
+      tensorTy.getContext(), 1, 1, 1, order, ctaLayout);
+  auto sharedLL = triton::gpu::toLinearLayout(shape, sharedEncoding);
+  auto invertedLL = ll.invertAndCompose(sharedLL).flattenOuts();
+
+  auto [newContig, permutation] = largestVectorisation(
+      tensorTy.getContext(), invertedLL, elementBitWidth, std::nullopt);
+
+  unsigned contiguity = std::min(align, (unsigned)newContig);
+  // linAttr.dump();
+  llvm::outs() << align << " " << contiguity << "\n";
 
   return contiguity;
 }

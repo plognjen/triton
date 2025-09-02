@@ -2,6 +2,7 @@
 #include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 #include "third_party/amd/include/Analysis/AxisInfoExt.h"
+#include "triton/Tools/LayoutUtils.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
@@ -398,22 +399,22 @@ static bool isCoalesced(RankedTensorType loadType,
   // [0, 1]], ...}>, so we don't use largest vectorization here as well. This
   // should be updated once vectorization in load op lowering is fixed..
   //
-  // auto ctaLayout = ttg::getCTALayout(loadType.getEncoding());
-  // // Dummy shared layout that emulates global memory so we can use
-  // // largestVectorisation utility.
-  // auto sharedEncoding = ttg::SwizzledSharedEncodingAttr::get(
-  //     ctx, 1, 1, 1, blockedEnc.getOrder(), ctaLayout);
-  // auto sharedLL = triton::gpu::toLinearLayout(shape, sharedEncoding);
-  // auto invertedLL = ll.invertAndCompose(sharedLL).flattenOuts();
+  auto ll = llEnc.toLinearLayout(shape);
+  auto ctaLayout = ttg::getCTALayout(loadType.getEncoding());
+  // Dummy shared layout that emulates global memory so we can use
+  // largestVectorisation utility.
+  auto sharedEncoding = ttg::SwizzledSharedEncodingAttr::get(
+      ctx, 1, 1, 1, blockedEnc.getOrder(), ctaLayout);
+  auto sharedLL = triton::gpu::toLinearLayout(shape, sharedEncoding);
+  auto invertedLL = ll.invertAndCompose(sharedLL).flattenOuts();
 
-  // auto [contigPerThreadLL, permutation] =
-  //     largestVectorisation(ctx, invertedLL, bitwidth, std::nullopt);
+  auto [contigPerThreadLL, permutation] =
+      largestVectorisation(ctx, invertedLL, 8, std::nullopt);
 
-  const unsigned contigPerThreadLL = llEnc.getContigPerThread()[contigDim];
+  // const unsigned contigPerThreadLL = llEnc.getContigPerThread()[contigDim];
   const unsigned contigPerWarpLL = llEnc.getContigPerWarp()[contigDim];
   auto blockedLL = toLinearEncoding(blockedEnc, shape);
   const unsigned contigPerWarpBlocked = llEnc.getContigPerWarp()[contigDim];
-  auto ll = llEnc.toLinearLayout(shape);
 
   // 1) Require that the linear layout provides at least as much per-thread and
   // per-warp contiguity as the original load encoding.
