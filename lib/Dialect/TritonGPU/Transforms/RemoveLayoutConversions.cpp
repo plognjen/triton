@@ -1107,6 +1107,9 @@ void LayoutRematerialization::backwardRematerialization(
   RankedTensorType targetType = convertOp.getType();
   if (isa<DotOperandEncodingAttr>(targetType.getEncoding()))
     return;
+  if (isa<AMDMfmaEncodingAttr>(targetType.getEncoding()))
+    return;
+
   Value oldV = convertOp.getSrc();
   LDBG("check backward remat with source " << oldV << " encoding "
                                            << targetType.getEncoding());

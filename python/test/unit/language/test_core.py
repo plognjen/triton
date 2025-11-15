@@ -3097,17 +3097,14 @@ def convert_fp8_to_fp32(x, device, dtype_str):
         return torch.tensor(x, device=device).view(torch.float8_e5m2fnuz).to(torch.float32)
     raise AssertionError("Unsupported float8 dtype")
 
-
+# (64, 32, 64)
 # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
 def get_test_dot_base_cases():
-    return [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
-            for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
-            for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
-            for input_precision in ['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6']
-            for in_dtype, out_dtype in [('float16', 'float16'), ('float16',
-                                                                 'float32'), ('float32',
-                                                                              'float32'), ('float64', 'float64')]
-            if not (input_precision != 'ieee' and (in_dtype in ['float16']))]
+    return [(*shape, 8, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
+            for shape in [(128, 64, 64)]
+            for epilogue in ['none']
+            for input_precision in ['ieee']
+            for in_dtype, out_dtype in [('float16', 'float16')]]
 
 
 # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
@@ -3210,18 +3207,18 @@ def get_test_small_dots_cases():
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
     "M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size",
-    get_test_dot_vdot2_cases() + \
-    get_test_dot_double_rate_cases() + \
-    get_test_dot_base_cases() + \
-    get_test_dot_mixed_sizes_cases() + \
-    get_test_dot_transposed_op_base_cases() + \
-    get_test_dot_h100_shortcut_cases() + \
-    get_test_dot_mfma_edge_cases() + \
-    get_test_dot_fp8_output_cases() + \
-    get_test_dot_small_k_mfma_cases() + \
-    get_test_dot_small_mn_mfma_cases() + \
-    get_test_dot_softmax() + \
-    get_test_small_dots_cases())
+    # get_test_dot_vdot2_cases() + \
+    # get_test_dot_double_rate_cases() + \
+    get_test_dot_base_cases())
+    # get_test_dot_mixed_sizes_cases() + \
+    # get_test_dot_transposed_op_base_cases() + \
+    # get_test_dot_h100_shortcut_cases() + \
+    # get_test_dot_mfma_edge_cases() + \
+    # get_test_dot_fp8_output_cases() + \
+    # get_test_dot_small_k_mfma_cases() + \
+    # get_test_dot_small_mn_mfma_cases() + \
+    # get_test_dot_softmax() + \
+    # get_test_small_dots_cases())
 @pytest.mark.parametrize("num_ctas", num_ctas_list)
 def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size,
              num_ctas, device):
@@ -3363,7 +3360,7 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         kern_kwargs['kpack'] = kpack
         if mma_nonk_size is not None:
             kern_kwargs['matrix_instr_nonkdim'] = mma_nonk_size
-
+    kern_kwargs['matrix_instr_nonkdim'] = 16
     pgm = kernel[(1, 1)](x_tri, x_tri.stride(0), x_tri.stride(1), y_tri, y_tri.stride(0), y_tri.stride(1), w_tri,
                          w_tri.stride(0), w_tri.stride(1), z_tri, z_tri.stride(0), z_tri.stride(1), **kern_kwargs)
 

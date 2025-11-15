@@ -355,6 +355,7 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   StringAttr kRegister = S("register");
   StringAttr kLane = S("lane");
   StringAttr kWarp = S("warp");
+  StringAttr kRep = S("rep");
 
   // https://github.com/ROCm/amd_matrix_instruction_calculator can print the
   // register and lane layout for mfma instructions.
@@ -380,6 +381,10 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     assert(isTransposed && "64x4 mfma must be transposed");
 
   int tiles = (mDim * nDim) / (warpSize * height);
+
+  ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 
   LinearLayout tileLayout = LinearLayout::empty();
   if (!isTransposed) {
@@ -408,64 +413,45 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
       tileLayout *= LinearLayout::identity1D(tiles, kRegister, dimN);
   }
 
+  // Following layout is assumed to somehow be passed/described in mfma layout
+  // description
+  // auto warpLayout = LinearLayout({{kRegister, {{2, 0}}}, {kWarp, {{2, 1}, {1, 0}}}},
+  //                                {outDimNames[0], outDimNames[1]});
+  auto warpLayout = LinearLayout({{kRegister, {}}, {kWarp, {{2, 1}, {1, 0}, {2, 0}}}},
+                                 {outDimNames[0], outDimNames[1]});
+
+//  - register=1 -> (1, 0)
+//    register=2 -> (2, 0)
+//  - lane=1 -> (0, 1)
+//    lane=2 -> (0, 2)
+//    lane=4 -> (0, 4)
+//    lane=8 -> (0, 8)
+//    lane=16 -> (4, 0)
+//    lane=32 -> (8, 0)
+//  - warp=1 -> (16, 0)
+//    warp=2 -> (0, 16)
+// where out dims are: [dim1 (size 32), dim0 (size 32)]root@bg-1w300-g1-2a:/triton#
+
+  // auto warpLayout = LinearLayout({{kRegister, {}}, {kWarp, {{0, 1}, {1, 0}}}},
+  //                                {outDimNames[0], outDimNames[1]});
+
+  tileLayout  *= warpLayout;
   tileLayout = tileLayout.transposeOuts({dimN, dimM});
 
-  // Instead of defining the layout on a CTA tile and using the
-  // combineCtaCgaWithShape function to extend it to the whole tensor, we take a
-  // different approach. Suppose tilesPerWarp is 2x2—meaning a warp computes a
-  // 2x2 block of MFMA tiles. If we define the layout only on the CTA tile and
-  // extend it across the tensor, the resulting tile order won’t be N-contiguous
-  // (i.e., row-major). Due to the 2x2 shape, the third tile would fall in the M
-  // dimension. While defining the layout per CTA tile might seem more
-  // intuitive, the current dot op lowering assumes an N-contiguous ordering of
-  // MFMA tiles across the entire tensor. In other words, the lowering logic
-  // isn't layout-aware, it only supports a fixed N-contiguous MFMA tile
-  // ordering. Supporting other orderings would require extending the dot
-  // lowering implementation. For now, we conform to the current lowering
-  // algorithm by defining the MFMA linear layout globally, with N-contiguous
-  // tiles across the tensor and across CTA tile boundaries.
-  auto tilesPerWarp = getTilesPerWarp();
-  auto warpsPerCTA = getWarpsPerCTA();
-
-  const unsigned tilesPerWarpM = tilesPerWarp[mIndex];
-  const unsigned tilesPerWarpN = tilesPerWarp[nIndex];
-  const unsigned warpsPerCTAM = warpsPerCTA[mIndex];
-  const unsigned warpsPerCTAN = warpsPerCTA[nIndex];
-
-  // First, extend the layout along the N dimension:
-  // - registers are distributed across tilesPerWarpN
-  // - then across warpsPerCTAN in the N dimension.
-  tileLayout *= LinearLayout::identity1D(tilesPerWarpN, kRegister, dimN);
-  tileLayout *= LinearLayout::identity1D(warpsPerCTAN, kWarp, dimN);
-
-  // At this point, the layout is defined across the N dimension within a CTA
-  // tile. Instead of switching to the M dimension now, we continue extending
-  // the layout along the remaining N dimension, and only then proceed along M,
-  // following the tilesPerWarp configuration.
-  // If the N dimension is not large enough to span multiple CTA tiles (i.e.,
-  // the first argument is 0), an empty layout is created, so this identity
-  // layout will not introduce any new registers.
-  tileLayout *= LinearLayout::identity1D(
-      shape[nIndex] / (nDim * warpsPerCTAN * tilesPerWarpN), kRegister, dimN);
-  tileLayout *= LinearLayout::identity1D(tilesPerWarpM, kRegister, dimM);
-
-  // Finally, extend the layout across warps in the M dimension.
-  // After this step, the layout covers a sub-tensor of size ctaTileM × N,
-  // i.e., the full N dimension and a CTA tile's extent in M.
-  // The rest of the layout will be defined by combineCtaCgaWithShape.
-  tileLayout *= LinearLayout::identity1D(warpsPerCTAM, kWarp, dimM);
-
   // Adjust spatial ordering if batch dimension is present
-  if (hasBatchDim) {
-    assert(order[2] == 0);
-    // Extend the base vector with one value to accommodate for the batch
-    // dimension, which appears at the last.
-    tileLayout *= LinearLayout::identity1D(1, kRegister, outDimNames[order[2]]);
-    tileLayout *= LinearLayout::identity1D(1, kLane, outDimNames[order[2]]);
-    tileLayout *=
-        LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[order[2]]);
-  }
+  // if (hasBatchDim) {
+  //   assert(order[2] == 0);
+  //   // Extend the base vector with one value to accommodate for the batch
+  //   // dimension, which appears at the last.
+  //   tileLayout *= LinearLayout::identity1D(1, kRegister, outDimNames[order[2]]);
+  //   tileLayout *= LinearLayout::identity1D(1, kLane, outDimNames[order[2]]);
+  //   tileLayout *=
+  //       LinearLayout::identity1D(warpsPerCTA[0], kWarp, outDimNames[order[2]]);
+  // }
 
+  // llvm::outs() << shape[0] << " " << shape[1] << "\n";
+  // llvm::outs() << combineCtaCgaWithShape(tileLayout, getCTALayout(), shape);
+  // llvm::outs() << combineCtaCgaWithShape(tileLayout, getCTALayout(), shape) << "\n";
   return combineCtaCgaWithShape(tileLayout, getCTALayout(), shape);
 }
 
@@ -638,27 +624,45 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
     tileLayout *= LinearLayout::identity1D(kSize / kTileSize, kRegister, dimK);
   }
 
+  llvm::outs() << tileLayout << "\n";
+  auto warpLayout = LinearLayout::empty();
+  if(opIdx == 1){
+    warpLayout = LinearLayout({{kRegister, {}}, {kWarp, {{0, 1}, {0, 0}, {0, 0}}}},
+                                 {outDimNames[0], outDimNames[1]});
+
+  }else{
+    warpLayout = LinearLayout({{kRegister, {}}, {kWarp, {{2, 0}, {1, 0}, {2, 0}}}},
+                                 {outDimNames[0], outDimNames[1]});
+  }
+  // auto warpLayout = LinearLayout({{kRegister, {}}, {kWarp, {{2, 1}, {1, 0}, {2, 0}}}},
+  //                                {outDimNames[0], outDimNames[1]});
+
+  tileLayout  *= warpLayout;
+  llvm::outs() << tileLayout << "\n";
+  llvm::outs() << shape[0] << " " << shape[1] << "\n";
+  // tileLayout = tileLayout.transposeOuts({dimN, dimM});
+
   // Follow the tiles per warp property, repeat the tile layout
   // along the non-K dimension.
-  tileLayout *= LinearLayout::identity1D(tilePerWarpNonK, kRegister, dimNonK);
+  // tileLayout *= LinearLayout::identity1D(tilePerWarpNonK, kRegister, dimNonK);
 
-  tileLayout = tileLayout.transposeOuts({dimK, dimNonK});
-  if (hasBatchDim) {
-    assert(order[2] == 0);
-    // Extend the base vector with one value to accommodate for the batch
-    // dimension, which appears at the last.
-    tileLayout *= LinearLayout::identity1D(1, kRegister, outDimNames[order[2]]);
-    tileLayout *= LinearLayout::identity1D(1, kLane, outDimNames[order[2]]);
-  }
+  // tileLayout = tileLayout.transposeOuts({dimK, dimNonK});
+  // if (hasBatchDim) {
+  //   assert(order[2] == 0);
+  //   // Extend the base vector with one value to accommodate for the batch
+  //   // dimension, which appears at the last.
+  //   tileLayout *= LinearLayout::identity1D(1, kRegister, outDimNames[order[2]]);
+  //   tileLayout *= LinearLayout::identity1D(1, kLane, outDimNames[order[2]]);
+  // }
 
-  LinearLayout warpLayout = identityStandardND(kWarp, warpsPerCTA, warpOrder);
-  LinearLayout ctaLayout = tileLayout * warpLayout;
+  // LinearLayout warpLayout = identityStandardND(kWarp, warpsPerCTA, warpOrder);
+  // LinearLayout ctaLayout = tileLayout * warpLayout;
 
   // Note the current the output order is [k, nonk]/[k, nonk, batch]. If the
   // layout's out-size is smaller than the shape, we follow this order to
   // extend each dimension to match the shape. After that, we can transpose
   // to match the standard output order.
-  return combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCTALayout(), shape)
+  return combineCtaCgaWithShape(tileLayout, mfmaLayout.getCTALayout(), shape)
       .transposeOuts(outDimNames);
 }
 

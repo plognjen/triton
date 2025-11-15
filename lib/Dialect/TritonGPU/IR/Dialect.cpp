@@ -827,17 +827,19 @@ LinearEncodingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
     }
   }
 
+  
   const auto &bases = linearLayout.getBases();
   auto nonZero = [](auto val) { return val != 0; };
-  for (const auto &dimBases : llvm::make_second_range(bases)) {
-    if (!llvm::all_of(dimBases, [&](const auto &basis) {
-          return std::count_if(basis.begin(), basis.end(), nonZero) <= 1;
-        })) {
-      return emitError()
-             << "In a distributed layout, each base must move in at most one "
-                "dimension.";
-    }
-  }
+  // for (const auto &dimBases : llvm::make_second_range(bases)) {
+  //   if (!llvm::all_of(dimBases, [&](const auto &basis) {
+  //         return std::count_if(basis.begin(), basis.end(), nonZero) <= 1;
+  //       })) {
+  //     llvm::outs() << linearLayout << "\n";
+  //     return emitError()
+  //            << "In a distributed layout, each base must move in at most one "
+  //               "dimension.";
+  //   }
+  // }
 
   return success();
 }

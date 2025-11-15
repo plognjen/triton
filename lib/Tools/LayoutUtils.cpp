@@ -52,6 +52,7 @@ ensureLayoutNotLargerThan(const LinearLayout &layout,
 
   for (auto outDim : llvm::enumerate(layout.getOutDimNames())) {
     auto outDimName = outDim.value();
+    // llvm::outs() << "outDim " << outDimName << "\n";
     int32_t actualSize = layout.getOutDimSize(outDimName);
     int32_t desiredSize = shape.lookup(outDimName);
     if (actualSize <= desiredSize) {
