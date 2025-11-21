@@ -5,6 +5,7 @@
 using namespace mlir;
 
 using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
+using ::mlir::triton::gpu::LinearEncodingAttr;
 using ::mlir::triton::gpu::getShapePerCTA;
 
 namespace mlir::triton::AMD {
@@ -16,10 +17,10 @@ LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                           const LLVMTypeConverter *typeConverter,
                           ConversionPatternRewriter &rewriter);
 
-LogicalResult convertScaledMFMA(triton::DotScaledOp op,
-                                triton::DotScaledOp::Adaptor adaptor,
-                                const LLVMTypeConverter *typeConverter,
-                                ConversionPatternRewriter &rewriter);
+// LogicalResult convertScaledMFMA(triton::DotScaledOp op,
+//                                 triton::DotScaledOp::Adaptor adaptor,
+//                                 const LLVMTypeConverter *typeConverter,
+//                                 ConversionPatternRewriter &rewriter);
 
 LogicalResult convertWMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                           const LLVMTypeConverter *typeConverter,
@@ -46,6 +47,9 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
     if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
       return AMD::convertMFMA(op, adaptor, getTypeConverter(), rewriter);
     }
+    if (isa<LinearEncodingAttr>(dEncoding)) {
+      return AMD::convertMFMA(op, adaptor, getTypeConverter(), rewriter);
+    }
     if (isa<AMDWmmaEncodingAttr>(dEncoding)) {
       return AMD::convertWMMA(op, adaptor, getTypeConverter(), rewriter);
     }
@@ -59,28 +63,28 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
   }
 };
 
-struct ScaledDotOpConversion
-    : public ConvertOpToLLVMPattern<triton::DotScaledOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+// struct ScaledDotOpConversion
+//     : public ConvertOpToLLVMPattern<triton::DotScaledOp> {
+//   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
-  LogicalResult
-  matchAndRewrite(triton::DotScaledOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Value D = op.getResult();
+//   LogicalResult
+//   matchAndRewrite(triton::DotScaledOp op, OpAdaptor adaptor,
+//                   ConversionPatternRewriter &rewriter) const override {
+//     Value D = op.getResult();
 
-    auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
+//     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
 
-    if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
-      return AMD::convertScaledMFMA(op, adaptor, getTypeConverter(), rewriter);
-    }
-    if (isa<AMDWmmaEncodingAttr>(dEncoding)) {
-      return AMD::convertScaledWMMA(op, adaptor, getTypeConverter(), rewriter);
-    }
+//     if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
+//       return AMD::convertScaledMFMA(op, adaptor, getTypeConverter(), rewriter);
+//     }
+//     if (isa<AMDWmmaEncodingAttr>(dEncoding)) {
+//       return AMD::convertScaledWMMA(op, adaptor, getTypeConverter(), rewriter);
+//     }
 
-    llvm::report_fatal_error(
-        "Unsupported DotScaleOp found when converting TritonGPU to LLVM.");
-  }
-};
+//     llvm::report_fatal_error(
+//         "Unsupported DotScaleOp found when converting TritonGPU to LLVM.");
+//   }
+// };
 } // namespace
 
 namespace mlir::triton::AMD {
@@ -89,6 +93,6 @@ void populateDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                  ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                  PatternBenefit benefit) {
   patterns.add<DotOpConversion>(typeConverter, benefit);
-  patterns.add<ScaledDotOpConversion>(typeConverter, benefit);
+  // patterns.add<ScaledDotOpConversion>(typeConverter, benefit);
 }
 } // namespace mlir::triton::AMD
