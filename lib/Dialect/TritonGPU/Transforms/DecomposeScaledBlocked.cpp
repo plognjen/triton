@@ -30,9 +30,14 @@ DecomposeScaledBlocked::matchAndRewrite(DotScaledOp scaledDotOp,
           scaledDotOp.getResult().getType().getEncoding()))
     return failure();
 
+  if (isa_and_nonnull<LinearEncodingAttr>(
+          scaledDotOp.getResult().getType().getEncoding()))
+    return failure();
+
   // TODO: add support for m/n packed formats.
   if (!scaledDotOp.getLhsKPack() || !scaledDotOp.getRhsKPack())
     return failure();
+
   // Types
   auto computeType = getComputeType(scaledDotOp.getAElemType(),
                                     scaledDotOp.getBElemType(), rewriter);
@@ -249,6 +254,7 @@ DecomposeScaledBlocked::cvtDotOperand(PatternRewriter &rewriter,
   auto vType = v.getType();
   auto encoding =
       DotOperandEncodingAttr::get(ctx, opIdx, retEnc, vType.getElementType());
+  llvm::outs() << encoding << "\n";
   auto retTy = vType.cloneWithEncoding(encoding);
   return ConvertLayoutOp::create(rewriter, v.getLoc(), retTy, v);
 }

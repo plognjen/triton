@@ -1572,6 +1572,7 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
                      "Attribute":$parent,
                      "Type":$eltTy), [{
       NvidiaMmaEncodingAttr parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent);
+      $_get(context, opIdx, parent, 0);
       if (!parentAttr || (!parentAttr.isAmpere() && !parentAttr.isHopper()))
         return $_get(context, opIdx, parent, 0);
       // For MMAV2 and V3

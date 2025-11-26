@@ -3706,7 +3706,7 @@ def test_scaled_dot(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, nu
     DIV_FACTOR_B = 2 if type_b == "e2m1" else 1
     x = make_arg((M, K // DIV_FACTOR_A), type_a, col_major=col_a)
     y = make_arg((K // DIV_FACTOR_B, N), type_b, col_major=col_b)
-
+    ################################################
     min_scale, max_scale = (0, 142) if comp_dtype == torch.bfloat16 else (124, 131)
     scale_x = torch.randint(min_scale, max_scale + 1, (M, K // 32), dtype=torch.uint8, device=device)
     scale_y = torch.randint(min_scale, max_scale + 1, (N, K // 32), dtype=torch.uint8, device=device)

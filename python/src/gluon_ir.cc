@@ -939,9 +939,9 @@ void init_gluon_ir(py::module &&m) {
           MLIRContext ctx(MLIRContext::Threading::DISABLED);
           ctx.appendDialectRegistry(registry);
           ctx.loadAllAvailableDialects();
-
-          auto ll = ttg::chooseScaledMfmaScaleLayout(
-              &ctx, opIdx, shape, mfmaMDim, tilesPerWarp, warpsPerCTA);
+          mlir::triton::LinearLayout llNew;
+          auto ll = ttg::chooseScaledMfmaScaleLayout(&ctx, opIdx, shape,
+                                                     mfmaMDim, 32, llNew);
           auto attr = ttg::LinearEncodingAttr::get(&ctx, ll);
           return layoutToGluon(attr);
         });
