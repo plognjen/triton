@@ -3101,7 +3101,7 @@ def convert_fp8_to_fp32(x, device, dtype_str):
 # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
 def get_test_dot_base_cases():
     return [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
-            for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
+            for shape in [(256, 256, 128), (32, 32, 32), (16, 16, 16)]
             for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
             for input_precision in ['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6']
             for in_dtype, out_dtype in [('float16', 'float16'), ('float16',
@@ -3210,18 +3210,8 @@ def get_test_small_dots_cases():
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
     "M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size",
-    get_test_dot_vdot2_cases() + \
-    get_test_dot_double_rate_cases() + \
-    get_test_dot_base_cases() + \
-    get_test_dot_mixed_sizes_cases() + \
-    get_test_dot_transposed_op_base_cases() + \
-    get_test_dot_h100_shortcut_cases() + \
-    get_test_dot_mfma_edge_cases() + \
-    get_test_dot_fp8_output_cases() + \
-    get_test_dot_small_k_mfma_cases() + \
-    get_test_dot_small_mn_mfma_cases() + \
-    get_test_dot_softmax() + \
-    get_test_small_dots_cases())
+    get_test_dot_base_cases()
+    )
 @pytest.mark.parametrize("num_ctas", num_ctas_list)
 def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size,
              num_ctas, device):

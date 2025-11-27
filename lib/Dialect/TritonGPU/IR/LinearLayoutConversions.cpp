@@ -593,8 +593,10 @@ SmallVector<unsigned> findMfmaMNFromLL(LinearEncodingAttr mfmaLayout) {
   constexpr int N = 1;
 
   // In 32x32 mfma case, contig dimensions are 32x8
-  if (instShape[M] == 32)
+  if (instShape[M] == 32 || instShape[M] > 32) {
+    instShape[M] = 32;
     instShape[N] = 32;
+  }
 
   if (instShape[M] == 1) {
     instShape[M] = 4;
@@ -609,6 +611,7 @@ SmallVector<unsigned> findMfmaMNFromLL(LinearEncodingAttr mfmaLayout) {
 
 LinearLayout getWarpMfmaLayout(LinearLayout mfmaLayout, int mDim, int nDim,
                                MLIRContext *ctx) {
+  StringAttr kRegister = StringAttr::get(ctx, "register");
   StringAttr kWarp = S("warp");
 
   auto warpBasis = mfmaLayout.getBases().lookup(kWarp);
@@ -635,8 +638,10 @@ LinearLayout getWarpMfmaLayout(LinearLayout mfmaLayout, int mDim, int nDim,
   for (const auto &base : warpBasis) {
     std::vector<int32_t> basisNew;
     basisNew.reserve(rank);
-    for (int i = 0; i < rank; ++i)
+    for (int i = 0; i < rank; ++i) {
+      llvm::outs() << base[i] << "\n";
       basisNew.push_back(base[i] / divisors[i]);
+    }
 
     resultWarpBasis[kWarp].push_back(std::move(basisNew));
   }
@@ -664,8 +669,44 @@ LinearLayout getWarpMfmaLayout(LinearLayout mfmaLayout, int mDim, int nDim,
   for (auto &it : newOutDims)
     newOutDimsArray.emplace_back(it.first, it.second);
 
-  return LinearLayout(std::move(resultWarpBasis), newOutDimsArray,
-                      /*requiresSurjective=*/false);
+  auto currLayout = LinearLayout(resultWarpBasis, newOutDimsArray,
+                                 /*requiresSurjective=*/false);
+
+  int dropIdx = 0;
+  int inLoop = -1;
+  while (!currLayout.isSurjective()) {
+    inLoop++;
+    auto regBasis = mfmaLayout.getBases().lookup(kRegister);
+
+    // remove registers that don't represent repetion, that is, registers within
+    // one warp.
+    const auto dropElems = llvm::Log2_32(((mDim * nDim) / 64)) + dropIdx;
+    llvm::outs() << mDim << " " << nDim << "\n";
+    std::vector<std::vector<int32_t>> regBasisNew(regBasis.begin() + dropElems,
+                                                  regBasis.end());
+
+    llvm::outs() << regBasisNew.size() << "\n";
+    dropIdx++;
+    std::vector<int32_t> basisNew;
+    basisNew.reserve(rank);
+    for (int i = 0; i < rank; ++i) {
+      basisNew.push_back(regBasisNew[0][i] / divisors[i]);
+    }
+
+    resultWarpBasis[kRegister].push_back(std::move(basisNew));
+    currLayout = LinearLayout(resultWarpBasis, newOutDimsArray,
+                              /*requiresSurjective=*/false);
+  }
+
+  if (inLoop > -1) {
+    LinearLayout::BasesT resultBasisNew;
+    resultBasisNew[kRegister] = currLayout.getBases().lookup(kRegister);
+    resultBasisNew[kWarp] = currLayout.getBases().lookup(kWarp);
+    currLayout = LinearLayout(resultBasisNew, newOutDimsArray,
+                              /*requiresSurjective=*/false);
+  }
+
+  return currLayout;
 }
 
 LinearLayout zeroOutDim(LinearLayout inLayout, StringAttr dim,
@@ -681,6 +722,8 @@ LinearLayout zeroOutDim(LinearLayout inLayout, StringAttr dim,
       break;
     }
   }
+  StringAttr kWarp = S("warp");
+  StringAttr kRegister = S("register");
 
   LinearLayout::BasesT result;
 
@@ -694,10 +737,17 @@ LinearLayout zeroOutDim(LinearLayout inLayout, StringAttr dim,
       // zero out the chosen dimension.
       if (dimIdx >= 0 && dimIdx < static_cast<int>(newBasis.size()))
         newBasis[dimIdx] = 0;
-      newInDimBases.push_back(std::move(newBasis));
+      if (inDim == kRegister) {
+        for (int i = 0; i < rank; i++)
+          if (newBasis[i] != 0) {
+            newInDimBases.push_back(std::move(newBasis));
+            break;
+          }
+      } else {
+        newInDimBases.push_back(std::move(newBasis));
+      }
     }
   }
-
   return LinearLayout(std::move(result), outDimNames);
 }
 
@@ -729,11 +779,11 @@ LinearLayout chooseMfmaWarpLinearLayout(MLIRContext *ctx, unsigned rank,
   auto warpLayout = LinearLayout::identity1D(tilesPerWarpN, kRegister, dimN);
 
   warpLayout *=
-      LinearLayout::identity1D(warpsPerCTAN * tilesPerWarpN, kWarp, dimN);
+      LinearLayout::identity1D(warpsPerCTAN, kWarp, dimN);
   warpLayout *= LinearLayout::identity1D(tilesPerWarpM, kRegister, dimM);
 
   warpLayout *=
-      LinearLayout::identity1D(warpsPerCTAM * tilesPerWarpM, kWarp, dimM);
+      LinearLayout::identity1D(warpsPerCTAM, kWarp, dimM);
   warpLayout = warpLayout.transposeOuts({dimM, dimN});
 
   return warpLayout;
@@ -908,13 +958,18 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
   if (kSize > kTileSize) {
     tileLayout *= LinearLayout::identity1D(kSize / kTileSize, kRegister, dimK);
   }
+  // tileLayout = tileLayout.transposeOuts({dimK, dimNonK});
 
   auto mfmaLinLay = triton::gpu::toLinearLayout(shape, mfmaLayout);
   auto warpMfmaLayout = getWarpMfmaLayout(
-      triton::gpu::toLinearLayout(shape, mfmaLayout), mDim, nDim, ctx);
+      triton::gpu::toLinearLayout({256, 256}, mfmaLayout), mDim, nDim, ctx);
   auto warpDotMfmaLayout = zeroOutDim(warpMfmaLayout, dimK, ctx);
 
   LinearLayout ctaLayout = tileLayout;
+  // llvm::outs() << "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+  // llvm::outs() << warpMfmaLayout << "\n";
+  // llvm::outs() << warpDotMfmaLayout << "\n";
+  // llvm::outs() << tileLayout << "\n";
   ctaLayout = tileLayout * warpDotMfmaLayout;
 
   std::vector<unsigned> v0(rank, 0);
@@ -922,8 +977,11 @@ LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
   std::vector<unsigned> v2(rank, 1);
 
   auto cgaLayout = CTALayoutAttr::get(ctx, v2, v1, v0);
+  // llvm::outs() << ctaLayout << "\n";
+
   auto retLay = combineCtaCgaWithShape(ctaLayout, cgaLayout, shape)
                     .transposeOuts(outDimNames);
+  llvm::outs() << retLay << "\n";
   return retLay;
 }
 

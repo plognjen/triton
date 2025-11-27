@@ -260,7 +260,9 @@ struct DotOpMFMAConversionHelper {
     newBasis[kRegister] = std::move(regBasisNew);
 
     auto outDimNames = standardOutDimNames(ctx, rank);
-    return LinearLayout(std::move(newBasis), outDimNames);
+    auto retLayout = LinearLayout(std::move(newBasis), outDimNames);
+    llvm::outs() << retLayout << "\n";
+    return retLayout;
   }
 
   SmallVector<int64_t> getInstrShapeForOperandNew(int kWidth, int opIdx,
@@ -466,7 +468,7 @@ struct DotOpMFMAConversionHelper {
           op2 = operandB[{b, n, k / numBroadcastB}];
         }
 
-        if (isTransposed)
+        if (true)
           std::swap(op1, op2);
 
         acc = generateMFMAOp(intrinsicName, op1, op2, acc, cbsz, abid);

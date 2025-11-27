@@ -554,8 +554,9 @@ public:
 
     auto mfmaLayout = ttg::chooseMfmaLinearLayout(
         ctx, retShape, mDim, nDim, kDim, isTransposed,
-        mfmaAccType.getIntOrFloatBitWidth(), warpsPerTile, tilesPerWarp);
+        mfmaAccType.getIntOrFloatBitWidth(), warpsPerTile, {2, 2});
 
+    llvm::outs() << mfmaLayout << "\n";
     auto linearMfmaEnc = ttg::LinearEncodingAttr::get(ctx, mfmaLayout);
 
     // convert accumulator

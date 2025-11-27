@@ -618,8 +618,8 @@ void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
   PatternBenefit transBenefit = PatternBenefit(benefit.getBenefit() + 1);
   PatternBenefit barrierBenefit = PatternBenefit(benefit.getBenefit() + 1);
 
-  patterns.add<TransLocalLoadOpConversion>(typeConverter, targetInfo,
-                                           transBenefit);
+  // patterns.add<TransLocalLoadOpConversion>(typeConverter, targetInfo,
+  //                                          transBenefit);
   patterns.add<LocalLoadPackedTransposedOpConversion>(typeConverter, targetInfo,
                                                       benefit);
   patterns.add<LocalBarrierOpConversion, MemoryCounterWaitOpConversion>(
