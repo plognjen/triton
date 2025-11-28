@@ -6,6 +6,7 @@ using namespace mlir;
 
 using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
 using ::mlir::triton::gpu::getShapePerCTA;
+using ::mlir::triton::gpu::LinearEncodingAttr;
 
 namespace mlir::triton::AMD {
 LogicalResult convertAMDFMADot(triton::DotOp op, triton::DotOp::Adaptor adaptor,
@@ -46,6 +47,9 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
     if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
       return AMD::convertMFMA(op, adaptor, getTypeConverter(), rewriter);
     }
+    if (isa<LinearEncodingAttr>(dEncoding)) {
+      return AMD::convertMFMA(op, adaptor, getTypeConverter(), rewriter);
+    }
     if (isa<AMDWmmaEncodingAttr>(dEncoding)) {
       return AMD::convertWMMA(op, adaptor, getTypeConverter(), rewriter);
     }
@@ -70,7 +74,7 @@ struct ScaledDotOpConversion
 
     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
 
-    if (isa<AMDMfmaEncodingAttr>(dEncoding)) {
+    if (isa<LinearEncodingAttr>(dEncoding)) {
       return AMD::convertScaledMFMA(op, adaptor, getTypeConverter(), rewriter);
     }
     if (isa<AMDWmmaEncodingAttr>(dEncoding)) {

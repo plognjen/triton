@@ -13,6 +13,7 @@ enum class ScaleDotElemType : uint32_t;
 } // namespace mlir::triton
 
 namespace mlir::triton::gpu {
+class LinearEncodingAttr;
 class SwizzledSharedEncodingAttr;
 class NVMMASharedEncodingAttr;
 class TensorOrMemDesc;
@@ -117,12 +118,28 @@ chooseDsReadTrLayout(Attribute enc, ArrayRef<int64_t> shape,
                      int32_t elemBitWidth, unsigned instBitWidth,
                      unsigned numLanesInShuffleGroup);
 
+LinearLayout chooseMfmaTileLinearLayout(MLIRContext *ctx, ArrayRef<long> shape,
+                                        int mDim, int nDim, int kDim,
+                                        bool isTransposed,
+                                        unsigned elementBitWidth);
+
+LinearLayout chooseMfmaWarpLinearLayout(MLIRContext *ctx, unsigned rank,
+                                        ArrayRef<unsigned> warpsPerCTA,
+                                        ArrayRef<unsigned> tilesPerWarp);
+
+LinearLayout chooseMfmaLinearLayout(MLIRContext *ctx, ArrayRef<long> shape,
+                                    int mDim, int nDim, int kDim,
+                                    bool isTransposed, unsigned elementBitWidth,
+                                    ArrayRef<unsigned> warpsPerCTA,
+                                    ArrayRef<unsigned> tilesPerWarp);
+
+SmallVector<unsigned> findMfmaMNFromLL(LinearEncodingAttr mfmaLayout);
+
 // Create LinearLayout for scale in scaled mfma.
 LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          ArrayRef<int64_t> dotOperandShape,
-                                         unsigned mfmaMDim,
-                                         ArrayRef<unsigned> tilesPerWarp,
-                                         ArrayRef<unsigned> warpsPerCTA);
+                                         unsigned mfmaMDim, unsigned mfmaNDim,
+                                         LinearLayout mfmaLay);
 
 LinearLayout chooseScaledWmmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
                                          ArrayRef<int64_t> dotOperandShape,

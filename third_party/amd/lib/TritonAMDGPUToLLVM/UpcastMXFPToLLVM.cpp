@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include <array>
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -201,12 +202,12 @@ public:
 
     auto dotEncoding =
         cast<DotOperandEncodingAttr>(op.getSrc().getType().getEncoding());
-    auto mfmaEncoding = dyn_cast<AMDMfmaEncodingAttr>(dotEncoding.getParent());
+    auto mfmaEncoding = dyn_cast<LinearEncodingAttr>(dotEncoding.getParent());
     if (!mfmaEncoding)
       return rewriter.notifyMatchFailure(op, "NYI: non-mfma dot operand");
-    LDBG("mfma: " << mfmaEncoding);
+    // LDBG("mfma: " << mfmaEncoding);
 
-    int mDim = mfmaEncoding.getInstrShape()[0];
+    int mDim = findMfmaMNFromLL(mfmaEncoding)[0]; //mfmaEncoding.getInstrShape()[0];
     if (mDim != 32 && mDim != 16)
       return rewriter.notifyMatchFailure(op, "NYI: non-mfma32/16 intrinsics");
 
