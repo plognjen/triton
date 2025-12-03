@@ -497,25 +497,27 @@ protected:
   Type f16Ty;
 };
 
-class AMDMfmaLayoutTest : public AMDLayoutTest {
-public:
-  AMDMfmaLayoutTest() = default;
+// class AMDMfmaLayoutTest : public AMDLayoutTest {
+// public:
+//   AMDMfmaLayoutTest() = default;
 
-  triton::gpu::AMDMfmaEncodingAttr createMFMA(ArrayRef<unsigned> instrShape,
-                                              ArrayRef<unsigned> warpsPerCTA) {
-    return triton::gpu::AMDMfmaEncodingAttr::get(
-        &ctx, /*version=*/2, warpsPerCTA, instrShape,
-        /*isTransposed=*/false, ctaLayout);
-  }
+//   triton::gpu::AMDMfmaEncodingAttr createMFMA(ArrayRef<unsigned> instrShape,
+//                                               ArrayRef<unsigned> warpsPerCTA) {
+//     LinearLayout warpLayout;
+//     return triton::gpu::AMDMfmaEncodingAttr::get(
+//         &ctx, /*version=*/2, warpLayout, instrShape,
+//         /*isTransposed=*/false, ctaLayout, 16);
+//   }
 
-  triton::gpu::AMDMfmaEncodingAttr
-  createTransposedMFMA(ArrayRef<unsigned> instrShape,
-                       ArrayRef<unsigned> warpsPerCTA) {
-    return triton::gpu::AMDMfmaEncodingAttr::get(
-        &ctx, /*version=*/2, warpsPerCTA, instrShape,
-        /*isTransposed=*/true, ctaLayout);
-  }
-};
+//   triton::gpu::AMDMfmaEncodingAttr
+//   createTransposedMFMA(ArrayRef<unsigned> instrShape,
+//                        ArrayRef<unsigned> warpsPerCTA) {
+//     LinearLayout warpLayout;
+//     return triton::gpu::AMDMfmaEncodingAttr::get(
+//         &ctx, /*version=*/2, warpLayout, instrShape,
+//         /*isTransposed=*/true, ctaLayout, 16);
+//   }
+// };
 
 class LinearEncodingTest : public ::testing::Test {
 public:

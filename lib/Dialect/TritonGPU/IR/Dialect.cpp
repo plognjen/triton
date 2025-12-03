@@ -1170,71 +1170,72 @@ Attribute AMDMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
       if (parseUInt(parser, attr, version, "version").failed())
         return {};
     }
-    if (attr.getName() == "warpsPerCTA") {
-      if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
-        return {};
-    }
+
+    // Assume it's the first variant if offset or block is defined
+
+    // TODO: Add printing of warpLayout
     if (attr.getName() == "instrShape") {
       if (parseIntArrayAttr(parser, attr, instrShape, "instrShape").failed())
         return {};
     }
-    if (attr.getName() == "isTransposed") {
-      if (parseBool(parser, attr, isTransposed, "isTransposed").failed())
-        return {};
+      if (attr.getName() == "isTransposed") {
+        if (parseBool(parser, attr, isTransposed, "isTransposed").failed())
+          return {};
+      }
+      if (attr.getName() == "CTAsPerCGA") {
+        if (parseIntArrayAttr(parser, attr, CTAsPerCGA.emplace(), "CTAsPerCGA")
+                .failed())
+          return {};
+      }
+      if (attr.getName() == "CTASplitNum") {
+        if (parseIntArrayAttr(parser, attr, CTASplitNum.emplace(),
+                              "CTASplitNum")
+                .failed())
+          return {};
+      }
+      if (attr.getName() == "CTAOrder") {
+        if (parseIntArrayAttr(parser, attr, CTAOrder.emplace(), "CTAOrder")
+                .failed())
+          return {};
+      }
+      if (attr.getName() == "elementBitWidth") {
+        if (parseUInt(parser, attr, elementBitWidth, "elementBitWidth")
+                .failed())
+          return {};
+      }
     }
-    if (attr.getName() == "CTAsPerCGA") {
-      if (parseIntArrayAttr(parser, attr, CTAsPerCGA.emplace(), "CTAsPerCGA")
-              .failed())
-        return {};
-    }
-    if (attr.getName() == "CTASplitNum") {
-      if (parseIntArrayAttr(parser, attr, CTASplitNum.emplace(), "CTASplitNum")
-              .failed())
-        return {};
-    }
-    if (attr.getName() == "CTAOrder") {
-      if (parseIntArrayAttr(parser, attr, CTAOrder.emplace(), "CTAOrder")
-              .failed())
-        return {};
-    }
-    if (attr.getName() == "tilesPerWarp") {
-      if (parseIntArrayAttr(parser, attr, tilesPerWarp, "tilesPerWarp")
-              .failed())
-        return {};
-    }
-    if (attr.getName() == "elementBitWidth") {
-      if (parseUInt(parser, attr, elementBitWidth, "elementBitWidth").failed())
-        return {};
-    }
-  }
 
   std::optional<CTALayoutAttr> CTALayout = getCTALayoutOrError(
       parser, CTAsPerCGA, CTASplitNum, CTAOrder, /*rank=*/warpsPerCTA.size());
   if (!CTALayout.has_value())
     return {};
 
+  std::vector<std::string> inDimNames = {"register", "warp"};
+  auto maybeLL = parseLinearLayout(dict, parser, inDimNames);
+  if (!maybeLL.has_value())
+    return {};
+
   if (tilesPerWarp.empty())
     tilesPerWarp = SmallVector<unsigned>(instrShape.size(), 1);
 
   return parser.getChecked<AMDMfmaEncodingAttr>(
-      parser.getContext(), version, warpsPerCTA, instrShape, isTransposed,
-      *CTALayout, tilesPerWarp, elementBitWidth);
+      parser.getContext(), version, std::move(*maybeLL), instrShape,
+      isTransposed, *CTALayout, elementBitWidth);
 }
 
+// TODO: Add printing of warpLayout
 void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
-          << "version = " << getVersion()                   //
-          << ", warpsPerCTA = [" << getWarpsPerCTA() << "]" //
-          << ", instrShape = [" << getInstrShape() << "]";
+          << "version = " << getVersion();
 
   printer << ", isTransposed = " << getIsTransposed();
 
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getRank());
 
-  auto tilesPerWarp = getTilesPerWarp();
-  if (!hasUnitTilesPerWarp())
-    printer << ", tilesPerWarp = [" << getTilesPerWarp() << "]";
+  // auto tilesPerWarp = getTilesPerWarp();
+  // if (!hasUnitTilesPerWarp())
+  //   printer << ", tilesPerWarp = [" << getTilesPerWarp() << "]";
 
   auto elementBitWidth = getElementBitWidth();
   if (elementBitWidth != 32)
@@ -1243,12 +1244,12 @@ void AMDMfmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "}>";
 }
 
-LogicalResult AMDMfmaEncodingAttr::verify(
-    function_ref<mlir::InFlightDiagnostic()> emitError, unsigned version,
-    llvm::ArrayRef<unsigned int> warpsPerCTA,
-    llvm::ArrayRef<unsigned int> instrShape, bool isTransposed,
-    mlir::triton::gpu::CTALayoutAttr, llvm::ArrayRef<unsigned int> tilesPerWarp,
-    unsigned elementBitWidth) {
+LogicalResult
+AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
+                            unsigned version, LinearLayout warpLayout,
+                            llvm::ArrayRef<unsigned int> instrShape,
+                            bool isTransposed, mlir::triton::gpu::CTALayoutAttr,
+                            unsigned elementBitWidth) {
   if (!(version >= 0 && version <= 4)) {
     return emitError() << "version must be in the [0, 4] range";
   }
@@ -2187,7 +2188,7 @@ void AMDRotatingSharedEncodingAttr::print(AsmPrinter &printer) const {
 // TODO: there is a lot of common code with MmaEncoding here
 
 bool AMDMfmaEncodingAttr::hasUnitTilesPerWarp() const {
-  return llvm::all_of(getTilesPerWarp(), [](int x) { return x == 1; });
+  return true;
 }
 
 SmallVector<int64_t>
@@ -2222,31 +2223,32 @@ AMDMfmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
 SmallVector<int64_t>
 AMDMfmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
                                       int kWidth, int opIdx) const {
-  auto operandTileShape = getInstrShapeForOperand(kWidth, opIdx);
-  auto rank = operandShape.size();
-  auto warpsPerCTA = getWarpsPerCTA();
-  auto tilesPerWarp = getTilesPerWarp();
+  return{1, 1};
+  // auto operandTileShape = getInstrShapeForOperand(kWidth, opIdx);
+  // auto rank = operandShape.size();
+  // auto warpsPerCTA = getWarpsPerCTA();
+  // auto tilesPerWarp = getTilesPerWarp();
 
-  int numRepBatch =
-      rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
-  if (opIdx == 0)
-    return {
-        numRepBatch,
-        std::max<int64_t>(1, operandShape[rank - 2] /
-                                 (operandTileShape[0] * tilesPerWarp[rank - 2] *
-                                  warpsPerCTA[rank - 2])) *
-            tilesPerWarp[rank - 2],
-        std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
-  else {
-    assert(opIdx == 1);
-    return {
-        numRepBatch,
-        std::max<int64_t>(1, operandShape[rank - 2] / operandTileShape[0]),
-        std::max<int64_t>(1, operandShape[rank - 1] /
-                                 (operandTileShape[1] * tilesPerWarp[rank - 1] *
-                                  warpsPerCTA[rank - 1])) *
-            tilesPerWarp[rank - 1]};
-  }
+  // int numRepBatch =
+  //     rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
+  // if (opIdx == 0)
+  //   return {
+  //       numRepBatch,
+  //       std::max<int64_t>(1, operandShape[rank - 2] /
+  //                                (operandTileShape[0] * tilesPerWarp[rank - 2] *
+  //                                 warpsPerCTA[rank - 2])) *
+  //           tilesPerWarp[rank - 2],
+  //       std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
+  // else {
+  //   assert(opIdx == 1);
+  //   return {
+  //       numRepBatch,
+  //       std::max<int64_t>(1, operandShape[rank - 2] / operandTileShape[0]),
+  //       std::max<int64_t>(1, operandShape[rank - 1] /
+  //                                (operandTileShape[1] * tilesPerWarp[rank - 1] *
+  //                                 warpsPerCTA[rank - 1])) *
+  //           tilesPerWarp[rank - 1]};
+  // }
 }
 
 SwizzledSharedEncodingAttr AMDMfmaEncodingAttr::composeSharedLayoutForOperand(

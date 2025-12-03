@@ -32,21 +32,6 @@ using triton::AMD::ISAFamily;
 constexpr char AttrDecomposedDotScaledSource[] =
     "amdg.decomposed_dot_scaled_source";
 
-int getMfmaVersion(ISAFamily isaFamily) {
-  switch (isaFamily) {
-  case ISAFamily::CDNA1:
-    return 1;
-  case ISAFamily::CDNA2:
-    return 2;
-  case ISAFamily::CDNA3:
-    return 3;
-  case ISAFamily::CDNA4:
-    return 4;
-  default:
-    break;
-  }
-  return 0;
-}
 
 int getWmmaVersion(StringRef archGen) {
   if (archGen.starts_with("gfx11"))
@@ -470,9 +455,12 @@ SmallVector<unsigned, 2> deduceTilesPerWarpForScale(
     if (!scale)
       return 1;
 
+    auto warpMfmaLayout = ttg::chooseMfmaWarpLinearLayout(
+        scale.getContext(), warpsPerCTA.size(), warpsPerCTA, tilesPerWarp);
+
     LinearLayout layout = ttg::chooseScaledMfmaScaleLayout(
         scale.getContext(), opIdx, scale.getType().getShape(), nonKDim,
-        tilesPerWarp, warpsPerCTA);
+        warpMfmaLayout);
     LLVM_DEBUG(llvm::dbgs() << "trying scale layout: " << layout << "\n");
 
     auto scaleDef = scale.getDefiningOp();
@@ -664,10 +652,12 @@ public:
       tilesPerWarp.insert(tilesPerWarp.begin(), 1);
     }
 
+    auto warpLayout = ttg::chooseMfmaWarpLinearLayout(ctx, retShape.size(),
+                                                 warpsPerTile, tilesPerWarp);
+
     ttg::AMDMfmaEncodingAttr mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
-        oldRetType.getContext(), mfmaVersion, warpsPerTile, {mDim, nDim, kDim},
-        isTransposed, CTALayout, tilesPerWarp,
-        mfmaAccType.getIntOrFloatBitWidth());
+        oldRetType.getContext(), mfmaVersion, warpLayout, {mDim, nDim, kDim},
+        isTransposed, CTALayout, mfmaAccType.getIntOrFloatBitWidth());
 
     // convert accumulator
     auto oldAcc = dotOp.getC();
@@ -853,9 +843,12 @@ public:
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
     auto elementBitWidth = oldRetType.getElementType().getIntOrFloatBitWidth();
+    auto warpLayout =
+        ttg::chooseMfmaWarpLinearLayout(ctx, rank, mfmaWarpsPerCTA, {1, 1});
+
     auto mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
-        ctx, mfmaVersion, mfmaWarpsPerCTA, {mDim, nDim, kDim},
-        /*isTransposed=*/true, ctaLayout, {}, elementBitWidth);
+        ctx, mfmaVersion, warpLayout, {mDim, nDim, kDim},
+        /*isTransposed=*/true, ctaLayout, elementBitWidth);
 
     auto newRetType = RankedTensorType::get(
         oldRetType.getShape(), oldRetType.getElementType(), mfmaEnc);
@@ -1095,9 +1088,13 @@ public:
     // Always use transposed mfma layout. This enables larger vectorization
     // for global store instructions.
     auto elementBitWidth = oldRetType.getElementType().getIntOrFloatBitWidth();
+
+    auto warpLayout =
+        ttg::chooseMfmaWarpLinearLayout(ctx, rank, warpsPerTile, {1, 1});
+
     mlir::Attribute mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
-        ctx, mfmaVersion, warpsPerTile, {mDim, nDim, kDim},
-        /*isTransposed=*/true, ctaLayout, tilesPerWarp, elementBitWidth);
+        ctx, mfmaVersion, warpLayout, {mDim, nDim, kDim},
+        /*isTransposed=*/true, ctaLayout, elementBitWidth);
 
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), mfmaEnc);
@@ -1198,8 +1195,8 @@ public:
         shape = llvm::to_vector(scale.getType().getShape());
       }
 
-      LinearLayout newLL = ttg::chooseScaledMfmaScaleLayout(
-          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile);
+      LinearLayout newLL =
+          ttg::chooseScaledMfmaScaleLayout(ctx, idx, shape, mDim, warpLayout);
 
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8

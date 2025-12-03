@@ -1155,30 +1155,25 @@ w2 w2 w3 w3
   let parameters = (
     ins
     "unsigned": $version,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA,
+    LinearLayoutParam:$warpLayout,
     ArrayRefParameter<"unsigned">:$instrShape,
     "bool":$isTransposed,
     "CTALayoutAttr":$CTALayout,
-    ArrayRefParameter<"unsigned">:$tilesPerWarp,
     "unsigned":$elementBitWidth
   );
 
-  let builders = [
-    AttrBuilder<(ins "unsigned":$version,
-                     "ArrayRef<unsigned>":$warpsPerCTA,
-                     "ArrayRef<unsigned>":$instrShape,
-                     "bool":$isTransposed,
-                     "CTALayoutAttr":$CTALayout,
-                     CArg<"ArrayRef<unsigned>", "{}">:$tpw,
-                     CArg<"unsigned", "0">:$elementBitWidth), [{
-      SmallVector<unsigned> tilesPerWarp(tpw);
-      if (tilesPerWarp.empty())
-        tilesPerWarp = SmallVector<unsigned>(warpsPerCTA.size(), 1);
-      if (elementBitWidth == 0)
-        elementBitWidth = 32;
-      return $_get($_ctxt, version, warpsPerCTA, instrShape, isTransposed, CTALayout, tilesPerWarp, elementBitWidth);
-    }]>
-  ];
+  // let builders = [
+  //   AttrBuilder<(ins "unsigned":$version,
+  //                    "LinearLayoutParam":$warpLayout,
+  //                    "ArrayRef<unsigned>":$instrShape,
+  //                    "bool":$isTransposed,
+  //                    "CTALayoutAttr":$CTALayout,
+  //                    CArg<"unsigned", "0">:$elementBitWidth), [{
+  //     if (elementBitWidth == 0)
+  //       elementBitWidth = 32;
+  //     return $_get($_ctxt, version, warpLayout, instrShape, isTransposed, CTALayout, elementBitWidth);
+  //   }]>
+  // ];
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
     SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
@@ -1198,7 +1193,7 @@ w2 w2 w3 w3
 
   let genVerifyDecl = 1;
   let hasCustomAssemblyFormat = 1;
-  let skipDefaultBuilders = 1;
+  // let skipDefaultBuilders = 1;
 }
 
 def AMDWmmaEncodingAttr : DistributedEncoding<"AMDWmmaEncoding", "amd_wmma_encoding", [MmaEncodingTrait]> {

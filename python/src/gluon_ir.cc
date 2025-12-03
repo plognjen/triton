@@ -238,8 +238,7 @@ py::object layoutToGluon(Attribute layout) {
     auto ctaLayout = amdMfma.getCTALayout();
     return layouts.AMDMFMALayout(
         amdMfma.getVersion(), toStdVector(amdMfma.getInstrShape()),
-        amdMfma.getIsTransposed(), toStdVector(amdMfma.getWarpsPerCTA()),
-        amdMfma.getElementBitWidth(), toStdVector(amdMfma.getTilesPerWarp()),
+        amdMfma.getIsTransposed(), amdMfma.getElementBitWidth(),
         toStdVector(ctaLayout.getCTAsPerCGA()),
         toStdVector(ctaLayout.getCTASplitNum()),
         toStdVector(ctaLayout.getCTAOrder()));
@@ -411,9 +410,10 @@ void init_gluon_ir(py::module &&m) {
              auto ctx = self.getContext();
              auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
                  ctx, ctasPerCga, ctaSplitNum, ctaOrder);
-             return ttg::AMDMfmaEncodingAttr::get(
-                 ctx, version, warpsPerCta, instrShape, transposed, ctaLayout,
-                 tilesPerWarp, elementBitWidth);
+             tt::LinearLayout warpLayout;
+             return ttg::AMDMfmaEncodingAttr::get(ctx, version, warpLayout,
+                                                  instrShape, transposed,
+                                                  ctaLayout, elementBitWidth);
            })
       .def("get_amd_wmma_layout",
            [](GluonOpBuilder &self, unsigned version, bool transposed,
@@ -939,9 +939,10 @@ void init_gluon_ir(py::module &&m) {
           MLIRContext ctx(MLIRContext::Threading::DISABLED);
           ctx.appendDialectRegistry(registry);
           ctx.loadAllAvailableDialects();
-
-          auto ll = ttg::chooseScaledMfmaScaleLayout(
-              &ctx, opIdx, shape, mfmaMDim, tilesPerWarp, warpsPerCTA);
+          auto warpMfmaLayout = ttg::chooseMfmaWarpLinearLayout(
+              &ctx, warpsPerCTA.size(), warpsPerCTA, tilesPerWarp);
+          auto ll = ttg::chooseScaledMfmaScaleLayout(&ctx, opIdx, shape,
+                                                     mfmaMDim, warpMfmaLayout);
           auto attr = ttg::LinearEncodingAttr::get(&ctx, ll);
           return layoutToGluon(attr);
         });

@@ -68,9 +68,9 @@ public:
     std::iota(cOrd.begin(), cOrd.end(), 0);
 
     auto ctaLayout = CTALayoutAttr::get(&ctx, cpg, cSplit, cOrd);
-    return AMDMfmaEncodingAttr::get(&ctx, version, warps, instrShape,
-                                    isTransposed, ctaLayout, tilesPerWarp,
-                                    elementBitWidth);
+    LinearLayout warpLayout;
+    return AMDMfmaEncodingAttr::get(&ctx, version, warpLayout, instrShape,
+                                    isTransposed, ctaLayout, elementBitWidth);
   }
 
   DotOperandEncodingAttr mfmaDotOp(AMDMfmaEncodingAttr mfma, unsigned opIdx,
