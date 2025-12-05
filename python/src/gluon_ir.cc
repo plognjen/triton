@@ -256,12 +256,10 @@ py::object layoutToGluon(Attribute layout) {
         amdMfma.getElementBitWidth(), toStdVector(amdMfma.getTilesPerWarp()),
         cgaBases);
   } else if (auto amdWmma = dyn_cast<ttg::AMDWmmaEncodingAttr>(layout)) {
-    auto cgaBases = getCgaLayoutBases(amdWmma.getCGALayout());
-    return layouts.AMDWMMALayout(
-        amdWmma.getVersion(), amdWmma.getIsTransposed(),
-        toStdVector(amdWmma.getWarpsPerCTA()),
-        toStdVector(amdWmma.getInstrShape()),
-        toStdVector(amdWmma.getTilesPerWarp()), cgaBases);
+//     auto cgaBases = getCgaLayoutBases(amdWmma.getCGALayout());
+//     return layouts.AMDWMMALayout(
+//         amdWmma.getVersion(), amdWmma.getIsTransposed(),
+//         toStdVector(amdWmma.getTilesPerWarp()), cgaBases);
   } else if (auto paddedShared =
                  dyn_cast<ttg::PaddedSharedEncodingAttr>(layout)) {
     auto *ctx = paddedShared.getContext();
@@ -455,12 +453,12 @@ void init_gluon_ir(py::module &&m) {
               std::vector<unsigned> &tilesPerWarp,
               std::vector<std::vector<int32_t>> &cgaBases,
               std::vector<unsigned> &instrShape) -> Attribute {
+             tt::LinearLayout warpLayout;
              auto ctx = self.getContext();
              unsigned rank = warpsPerCta.size();
              auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
-             return ttg::AMDWmmaEncodingAttr::get(ctx, version, transposed,
-                                                  warpsPerCta, tilesPerWarp,
-                                                  cgaLayout, instrShape);
+             return ttg::AMDWmmaEncodingAttr::get(
+                 ctx, version, warpLayout, transposed, cgaLayout, instrShape);
            })
       .def("get_padded_shared_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &intervals,
@@ -1003,9 +1001,11 @@ void init_gluon_ir(py::module &&m) {
           MLIRContext ctx(MLIRContext::Threading::DISABLED);
           ctx.appendDialectRegistry(registry);
           ctx.loadAllAvailableDialects();
+          auto warpMfmaLayout = ttg::chooseWmmaWarpLinearLayout(
+              &ctx, warpsPerCTA.size(), warpsPerCTA, tilesPerWarp);
 
-          auto ll = ttg::chooseScaledWmmaScaleLayout(
-              &ctx, opIdx, shape, wmmaMDim, tilesPerWarp, warpsPerCTA);
+          auto ll = ttg::chooseScaledWmmaScaleLayout(&ctx, opIdx, shape,
+                                                     wmmaMDim, warpMfmaLayout);
           auto attr = ttg::LinearEncodingAttr::get(&ctx, ll);
           return layoutToGluon(attr);
         });

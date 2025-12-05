@@ -1292,11 +1292,12 @@ public:
     auto warpsPerTile =
         warpsPerTileWMMA(dotOp, oldShape, numWarps, {mDim, nDim});
 
+    auto warpLayout =
+        ttg::chooseWmmaWarpLinearLayout(ctx, rank, warpsPerTile, {1, 1});
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(
-        ctx, wmmaVersion, true, warpsPerTile, cgaLayout, {mDim, nDim, kDim});
-    auto wmmaPackedEnc =
-        ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, true, warpsPerTile,
-                                      cgaLayout, {mDim, nDim, kDim / 2});
+        ctx, wmmaVersion, warpLayout, true, cgaLayout, {mDim, nDim, kDim});
+    auto wmmaPackedEnc = ttg::AMDWmmaEncodingAttr::get(
+        ctx, wmmaVersion, warpLayout, true, cgaLayout, {mDim, nDim, kDim / 2});
 
     auto newRetType =
         RankedTensorType::get(oldShape, oldRetType.getElementType(), wmmaEnc);
@@ -1351,8 +1352,8 @@ public:
       // TODO: Select tilesPerWarp in Triton
       SmallVector<unsigned> tilesPerWarp = {1, 1};
 
-      LinearLayout newLL = ttg::chooseScaledWmmaScaleLayout(
-          ctx, idx, shape, mDim, tilesPerWarp, warpsPerTile);
+      LinearLayout newLL =
+          ttg::chooseScaledWmmaScaleLayout(ctx, idx, shape, mDim, warpLayout);
       Attribute newScaleEncoding = ttg::LinearEncodingAttr::get(ctx, newLL);
       // Scale's data type is always i8
       auto newScaleType = RankedTensorType::get(shape, i8_ty, newScaleEncoding);
@@ -1553,8 +1554,11 @@ public:
     // Use transposed wmma layout to enable larger vectorization for global
     // store instructions.
     bool isTransposed = true;
-    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, isTransposed,
-                                            warpsPerTile, CGALayout,
+    auto warpLayout = ttg::chooseWmmaWarpLinearLayout(ctx, retShape.size(),
+                                                 warpsPerTile, {1, 1});
+
+    wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, warpLayout,
+                                            isTransposed, CGALayout,
                                             {mDim, nDim, kDim});
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);

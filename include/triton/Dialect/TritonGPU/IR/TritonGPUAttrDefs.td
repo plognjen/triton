@@ -1191,9 +1191,8 @@ w2 w2 w3 w3
   let parameters = (
     ins
     "unsigned": $version,
+    LinearLayoutParam:$warpLayout,
     "bool":$isTransposed,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA,
-    ArrayRefParameter<"unsigned">:$tilesPerWarp,
     "CGAEncodingAttr":$CGALayout,
     ArrayRefParameter<"unsigned">:$instrShape
   );
@@ -1201,16 +1200,16 @@ w2 w2 w3 w3
   let genVerifyDecl = 1;
   let hasCustomAssemblyFormat = 1;
 
-  let builders = [
-    AttrBuilder<(ins "unsigned":$version,
-                     "bool":$isTransposed,
-                     "ArrayRef<unsigned>":$warpsPerCTA,
-                     "CGAEncodingAttr":$CGALayout,
-                     "ArrayRef<unsigned>":$instrShape), [{
-      SmallVector<unsigned> tilesPerWarp(warpsPerCTA.size(), 1);
-      return $_get(context, version, isTransposed, warpsPerCTA, tilesPerWarp, CGALayout, instrShape);
-    }]>
-  ];
+  // let builders = [
+  //   AttrBuilder<(ins "unsigned":$version,
+  //                    "bool":$isTransposed,
+  //                    "ArrayRef<unsigned>":$warpsPerCTA,
+  //                    "CGAEncodingAttr":$CGALayout,
+  //                    "ArrayRef<unsigned>":$instrShape), [{
+  //     SmallVector<unsigned> tilesPerWarp(warpsPerCTA.size(), 1);
+  //     return $_get(context, version, isTransposed, warpsPerCTA, tilesPerWarp, CGALayout, instrShape);
+  //   }]>
+  // ];
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
     SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kDim, int opIdx) const;
