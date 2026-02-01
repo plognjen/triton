@@ -150,11 +150,18 @@ LogicalResult lowerLocalStore(Location loc, MLIRContext *ctx, Value regVal,
     cvt = regLayout.invertAndCompose(sharedLayout);
   }
   auto kBlock = str_attr("block");
+  auto kPartition = str_attr("partition");
   // NYI. We would need to emit a map.shared::cluster instruction.
   if (!cvt.isTrivialOver({kBlock})) {
     return failure();
   }
-  cvt = cvt.sublayout({kReg, kLane, kWarp}, {kOffset});
+
+  SmallVector<StringAttr> outDims = {kOffset};
+  if (cvt.hasOutDim(kPartition)) {
+    outDims.push_back(kPartition);
+  }
+  cvt = cvt.sublayout({kReg, kLane, kWarp}, outDims);
+
   lowerLocalLdSt(loc, ctx, cvt, inVals, llvmElemTy, memDescTy, smemObj,
                  rewriter, targetInfo);
 
@@ -207,21 +214,16 @@ struct LocalAllocOpConversion
     if (!op.isSharedMemoryAlloc())
       return failure();
     Location loc = op->getLoc();
+    // Get all shared memory bases (one for non-partitioned, multiple for
+    // partitioned tensors)
+    SmallVector<Value> smemBases = LLVM::getSharedMemoryBases(
+        loc, rewriter, targetInfo, op.getOperation());
     auto memDescTy = cast<MemDescType>(op.getType());
-    // TODO: PartitionedSharedEncoding lowering will be enabled in subsequent
-    // PRs.
-    if (isa<triton::gpu::PartitionedSharedEncodingAttr>(
-            memDescTy.getEncoding())) {
-      return rewriter.notifyMatchFailure(
-          op, "PartitionedSharedEncoding not yet supported in lowering");
-    }
-    Value smemBase =
-        LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
     auto typeConverter = getTypeConverter();
 
     auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
-    auto smemObj = SharedMemoryObject(smemBase, llvmElemTy, memDescTy.getRank(),
-                                      loc, rewriter);
+    auto smemObj = SharedMemoryObject(smemBases, llvmElemTy,
+                                      memDescTy.getRank(), loc, rewriter);
     // If there is an initial tensor, store it into the shared memory.
     if (op.getSrc()) {
       auto *ctx = op.getContext();
@@ -270,13 +272,6 @@ public:
     auto memDescVal = op.getSrc();
     auto regVal = op.getResult();
     auto memDescTy = cast<MemDescType>(memDescVal.getType());
-    // TODO: PartitionedSharedEncoding lowering will be enabled in subsequent
-    // PRs.
-    if (isa<triton::gpu::PartitionedSharedEncodingAttr>(
-            memDescTy.getEncoding())) {
-      return rewriter.notifyMatchFailure(
-          op, "PartitionedSharedEncoding not yet supported in lowering");
-    }
     auto regTy = cast<RankedTensorType>(regVal.getType());
     auto typeConverter = getTypeConverter();
 
@@ -289,7 +284,6 @@ public:
     auto kReg = str_attr("register");
     auto kLane = str_attr("lane");
     auto kWarp = str_attr("warp");
-    auto kOffset = str_attr("offset");
     auto regLayout = toLinearLayout(regTy);
     auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedEnc);
     LinearLayout cvt = LinearLayout::empty();
@@ -305,7 +299,12 @@ public:
     if (!cvt.isTrivialOver({kBlock})) {
       return failure();
     }
-    cvt = cvt.sublayout({kReg, kLane, kWarp}, {kOffset});
+
+    SmallVector<StringAttr> outDims = {str_attr("offset")};
+    if (cvt.hasOutDim(str_attr("partition"))) {
+      outDims.push_back(str_attr("partition"));
+    }
+    cvt = cvt.sublayout({kReg, kLane, kWarp}, outDims);
 
     auto outVals = lowerLocalLdSt(loc, ctx, cvt, {}, llvmElemTy, memDescTy,
                                   smemObj, rewriter, targetInfo, op);
@@ -341,13 +340,6 @@ public:
     Value memDescVal = op.getDst();
     auto typeConverter = getTypeConverter();
     auto memDescTy = cast<MemDescType>(memDescVal.getType());
-    // TODO: PartitionedSharedEncoding lowering will be enabled in subsequent
-    // PRs.
-    if (isa<triton::gpu::PartitionedSharedEncodingAttr>(
-            memDescTy.getEncoding())) {
-      return rewriter.notifyMatchFailure(
-          op, "PartitionedSharedEncoding not yet supported in lowering");
-    }
     auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getDst(),
                                                          llvmElemTy, rewriter);
