@@ -107,8 +107,8 @@ def make_tensor_descriptor(base: ttgl.tensor, shape: List[ttgl.constexpr | ttgl.
     assert isinstance(base.dtype, ttgl.pointer_type), "Expected base to be a pointer"
 
     layout = _unwrap_if_constexpr(layout)
-    assert isinstance(layout, (PaddedSharedLayout, SwizzledSharedLayout)), \
-        "Expected layout to be a PaddedSharedLayout or SwizzledSharedLayout"
+    # assert isinstance(layout, (PaddedSharedLayout, SwizzledSharedLayout)), \
+    #     "Expected layout to be a PaddedSharedLayout or SwizzledSharedLayout"
     if isinstance(layout, SwizzledSharedLayout):
         assert layout.max_phase == 1, "Expected max_phase to be 1 for SwizzledSharedLayout"
 
