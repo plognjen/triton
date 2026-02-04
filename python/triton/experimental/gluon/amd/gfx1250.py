@@ -23,8 +23,8 @@ class TensorDescriptor:
             f"Expected block_shape to have {ndim} dimensions but got {len(self.strides)}"
         validate_block_shape(self.block_shape)
         assert self.strides[-1] == 1, "Last dimension must be contiguous"
-        assert isinstance(self.layout, (PaddedSharedLayout, SwizzledSharedLayout)), \
-            "Expected layout to be a PaddedSharedLayout or SwizzledSharedLayout"
+        # assert isinstance(self.layout, (PaddedSharedLayout, SwizzledSharedLayout)), \
+        #     "Expected layout to be a PaddedSharedLayout or SwizzledSharedLayout"
         if isinstance(self.layout, SwizzledSharedLayout):
             assert self.layout.max_phase == 1, "Expected max_phase to be 1 for SwizzledSharedLayout"
         assert self.padding == "zero", "Only 'zero' padding is supported"

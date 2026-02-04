@@ -1771,10 +1771,11 @@ void finalizeTensorAtomicResults(Operation *op, RankedTensorType tensorTy,
             /*maybeMaxVecElems=*/{}, emitSt);
   b.barrier(triton::gpu::AddrSpace::Local);
 
-  resultVals = lowerLdSt(loc, ctx, dstLayout, resultVals, valueElemTy, smemBases,
-                         /*paddingShifts=*/{}, /*affineOffset=*/b.i32_val(0),
-                         /*maskSpanAffineOffset=*/0, laneId, warpId, rewriter,
-                         targetInfo, /*maybeMaxVecElems=*/{}, emitLd);
+  resultVals =
+      lowerLdSt(loc, ctx, dstLayout, resultVals, valueElemTy, smemBases,
+                /*paddingShifts=*/{}, /*affineOffset=*/b.i32_val(0),
+                /*maskSpanAffineOffset=*/0, laneId, warpId, rewriter,
+                targetInfo, /*maybeMaxVecElems=*/{}, emitLd);
 
   // Create the result struct and replace the operation
   Value resultStruct =

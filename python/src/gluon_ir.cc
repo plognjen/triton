@@ -285,7 +285,8 @@ py::object layoutToGluon(Attribute layout) {
                                       ll.getBases().lookup(kBlock), shape);
   } else if (auto partitioned =
                  dyn_cast<ttg::PartitionedSharedEncodingAttr>(layout)) {
-    py::object partitionLayout = layoutToGluon(partitioned.getPartitionLayout());
+    py::object partitionLayout =
+        layoutToGluon(partitioned.getPartitionLayout());
     return layouts.PartitionedSharedLayout(
         partitioned.getNumPartitions(), partitioned.getNumGroups(),
         partitioned.getPartitionDim(), partitionLayout);
