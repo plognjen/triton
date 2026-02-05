@@ -61,16 +61,30 @@ struct MakeTensorDescOpConversion
         return rewriter.notifyMatchFailure(op, "Descriptor has no layout.");
     }
     auto paddedEnc = llvm::dyn_cast<PaddedSharedEncodingAttr>(sharedEnc);
+    auto partitionedEnc =
+        llvm::dyn_cast<PartitionedSharedEncodingAttr>(sharedEnc);
 
     unsigned padInterval = 0;
     unsigned padAmount = 0;
     if (paddedEnc) {
+      // Standalone padded layout
       if (paddedEnc.getIntervals().size() != 1 ||
           paddedEnc.getPaddings().size() != 1)
         return rewriter.notifyMatchFailure(
             op, "NYI: Multiple interval-padding pairs in TDM.");
       padInterval = paddedEnc.getIntervals()[0];
       padAmount = paddedEnc.getPaddings()[0];
+    } else if (partitionedEnc) {
+      // Check if partitioned layout has a padded sublayout
+      if (auto innerPadded = llvm::dyn_cast<PaddedSharedEncodingAttr>(
+              partitionedEnc.getPartitionLayout())) {
+        if (innerPadded.getIntervals().size() != 1 ||
+            innerPadded.getPaddings().size() != 1)
+          return rewriter.notifyMatchFailure(
+              op, "NYI: Multiple interval-padding pairs in TDM.");
+        padInterval = innerPadded.getIntervals()[0];
+        padAmount = innerPadded.getPaddings()[0];
+      }
     }
 
     Type elementType =

@@ -118,6 +118,7 @@ struct ConvertTritonAMDGPUToLLVM
                                     mlir::triton::AMD::membarFilter);
     membarPass.run();
 
+    mod.dump();
     // Lower functions
     {
       TritonLLVMFunctionConversionTarget funcTarget(*context);

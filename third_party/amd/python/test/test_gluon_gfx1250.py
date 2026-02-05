@@ -1071,7 +1071,7 @@ def tensor_device_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
         NUM_PARTITIONS: ttgl.constexpr = 2
         NUM_GROUPS: ttgl.constexpr = 1
         inner_layout: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for(
-            [[32, 4]], [BLOCK_M // (NUM_PARTITIONS * NUM_GROUPS), BLOCK_N], [1, 0])
+            [[32, 4]], [BLOCK_M // NUM_PARTITIONS , BLOCK_N], [1, 0])
         smem_layout: ttgl.constexpr = ttgl.PartitionedSharedLayout(NUM_PARTITIONS, NUM_GROUPS, 0, inner_layout)
     else:
         smem_layout: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [BLOCK_M, BLOCK_N], [1, 0])
@@ -1229,7 +1229,18 @@ def test_runtime_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYP
         tensor_host_tdm_copy_kernel[grid](a_desc, b_device, M, N, NUM_BUFFERS, num_warps=NUM_WARPS)
 
     b_triton = b_device.cpu()
-    assert torch.equal(b_triton, a)
+    if not torch.equal(b_triton, a):
+        diff_mask = b_triton != a
+        num_diff = diff_mask.sum().item()
+        diff_positions = torch.nonzero(diff_mask)
+        print(f"\nMismatch: {num_diff} elements differ out of {a.numel()} total")
+        print(f"First 20 differing positions (row, col):")
+        for idx in diff_positions[:20]:
+            r, c = idx[0].item(), idx[1].item()
+            print(f"  [{r}, {c}]: expected {a[r, c].item()}, got {b_triton[r, c].item()}")
+        if num_diff > 20:
+            print(f"  ... and {num_diff - 20} more")
+        assert False, f"Tensor mismatch: {num_diff} elements differ"
 
 
 @gluon.jit
