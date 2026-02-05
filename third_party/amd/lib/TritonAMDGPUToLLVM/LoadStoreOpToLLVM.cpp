@@ -1180,21 +1180,36 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
 
     auto tensorDescTy = op.getDesc().getType();
     auto smemTy = op.getResult().getType();
+    auto encoding = smemTy.getEncoding();
     auto paddedEnc =
-        llvm::dyn_cast<PaddedSharedEncodingAttr>(smemTy.getEncoding());
+        llvm::dyn_cast<PaddedSharedEncodingAttr>(encoding);
+    auto partitionedEnc =
+        llvm::dyn_cast<PartitionedSharedEncodingAttr>(encoding);
     Type elementType = getTypeConverter()->convertType(smemTy.getElementType());
 
-    triton::LinearLayout sharedLayout;
+    // Use shared helper function to compute shared layout, handling padded,
+    // partitioned with padded sublayout, and standard encodings (same as
+    // local_load/local_store lowering).
+    triton::LinearLayout sharedLayout = triton::gpu::getSharedLayout(smemTy);
+
+    // Extract padding information if present
     unsigned padInterval = 0;
     unsigned padAmount = 0;
+    PaddedSharedEncodingAttr paddedLayoutForPadding = nullptr;
     if (paddedEnc) {
-      assert(paddedEnc.getIntervals().size() == 1 &&
-             paddedEnc.getPaddings().size() == 1);
-      sharedLayout = paddedEnc.getLinearComponent();
-      padInterval = paddedEnc.getIntervals()[0];
-      padAmount = paddedEnc.getPaddings()[0];
-    } else {
-      sharedLayout = triton::gpu::toLinearLayout(smemTy);
+      // Standalone padded layout
+      paddedLayoutForPadding = paddedEnc;
+    } else if (partitionedEnc) {
+      // Check if partitioned layout has a padded sublayout
+      paddedLayoutForPadding =
+          llvm::dyn_cast<PaddedSharedEncodingAttr>(
+              partitionedEnc.getPartitionLayout());
+    }
+    if (paddedLayoutForPadding) {
+      assert(paddedLayoutForPadding.getIntervals().size() == 1 &&
+             paddedLayoutForPadding.getPaddings().size() == 1);
+      padInterval = paddedLayoutForPadding.getIntervals()[0];
+      padAmount = paddedLayoutForPadding.getPaddings()[0];
     }
     Value multicastMask;
     if (targetInfo.supportsMultiCTALaunch()) {

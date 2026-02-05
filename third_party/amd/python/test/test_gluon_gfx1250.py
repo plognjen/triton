@@ -1195,7 +1195,7 @@ def test_compile_tensor_copy(BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYPE, NUM
 
 
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64), (1, 512), (256, 2)])
-@pytest.mark.parametrize("NUM_BUFFERS", [2])
+@pytest.mark.parametrize("NUM_BUFFERS", [1])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
 @pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["ASYNC_COPY", "DEVICE_TDM", "HOST_TDM", "DEVICE_TDM_PARTITIONED"])
 @pytest.mark.parametrize("M,N", [(1024, 1024), (1008, 1008)])

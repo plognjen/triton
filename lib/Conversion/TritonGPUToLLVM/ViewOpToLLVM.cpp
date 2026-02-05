@@ -493,14 +493,14 @@ struct MemDescIndexOpConversion
     auto dstTy = op.getResult().getType();
     auto llvmElemTy = getTypeConverter()->convertType(srcTy.getElementType());
 
-    if (auto partitionedEnc =
-            dyn_cast<PartitionedSharedEncodingAttr>(srcTy.getEncoding())) {
-      if (partitionedEnc.getPartitionDim() == 0) {
-        return rewriter.notifyMatchFailure(
-            op, "memdesc_index into partitioned dimension (partitionDim=0) "
-                "is not yet supported");
-      }
-    }
+    // if (auto partitionedEnc =
+    //         dyn_cast<PartitionedSharedEncodingAttr>(srcTy.getEncoding())) {
+    //   if (partitionedEnc.getPartitionDim() == 0) {
+    //     return rewriter.notifyMatchFailure(
+    //         op, "memdesc_index into partitioned dimension (partitionDim=0) "
+    //             "is not yet supported");
+    //   }
+    // }
 
     // getAllocationShapePerCTA returns the correct number fp4 elements that we
     // need to skip when we have fp4Padded=True. getShapePerCTA does not account

@@ -345,6 +345,18 @@ Value matrixVectorProd(TritonLLVMOpBuilder &b, const LinearLayout &A, Value x);
 
 // Whether the convert layout should be forced to use warp shuffles.
 bool cvtAlwaysUseWarpShuffle(triton::gpu::ConvertLayoutOp cvt);
+
+// Helper to construct linear layout for PartitionedSharedEncodingAttr with
+// PaddedSharedEncodingAttr sublayout.
+LinearLayout constructPartitionedLinearLayoutWithPadded(
+    ArrayRef<int64_t> shape,
+    triton::gpu::PartitionedSharedEncodingAttr partitioned,
+    triton::gpu::PaddedSharedEncodingAttr paddedLayout);
+
+// Compute the shared memory layout from a tensor type, handling padded,
+// partitioned with padded sublayout, and standard encodings.
+LinearLayout getSharedLayout(RankedTensorType type);
+LinearLayout getSharedLayout(MemDescType memDescTy);
 } // namespace gpu
 
 } // namespace triton

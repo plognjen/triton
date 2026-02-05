@@ -237,6 +237,88 @@ bool cvtAlwaysUseWarpShuffle(ConvertLayoutOp cvt) {
   return cvt->getParentOp()->hasAttrOfType<UnitAttr>("always_use_warp_shuffle");
 }
 
+// Helper to construct linear layout for PartitionedSharedEncodingAttr with
+// PaddedSharedEncodingAttr sublayout. This mirrors the logic in
+// partitionedSharedToLinearLayout but uses the linear component from the padded
+// layout.
+LinearLayout constructPartitionedLinearLayoutWithPadded(
+    ArrayRef<int64_t> shape,
+    triton::gpu::PartitionedSharedEncodingAttr partitioned,
+    triton::gpu::PaddedSharedEncodingAttr paddedLayout) {
+  MLIRContext *ctx = partitioned.getContext();
+  unsigned numPartitions = partitioned.getNumPartitions();
+  unsigned numGroups = partitioned.getNumGroups();
+  unsigned partitionDim = partitioned.getPartitionDim();
+  auto outDimNames = standardOutDimNames(ctx, shape.size());
+
+  // Step 1: Get the linear component from the padded layout
+  LinearLayout baseLayout = paddedLayout.getLinearComponent();
+
+  // Step 2: partLayout maps "partition" -> piece selection along partitionDim.
+  LinearLayout partLayout = LinearLayout::identity1D(
+      numPartitions, StringAttr::get(ctx, "partition"), outDimNames[partitionDim]);
+  auto groupLayout = baseLayout * partLayout;
+
+  // Step 3: extend "offset" to address across groups.
+  LinearLayout extension = LinearLayout::identity1D(
+      numGroups, StringAttr::get(ctx, "offset"), outDimNames[partitionDim]);
+
+  return groupLayout * extension;
+}
+
+// Compute the shared memory layout from a tensor type, handling padded,
+// partitioned with padded sublayout, and standard encodings.
+LinearLayout getSharedLayout(RankedTensorType type) {
+  auto encoding = type.getEncoding();
+  auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(encoding);
+  auto partitionedEnc =
+      dyn_cast<triton::gpu::PartitionedSharedEncodingAttr>(encoding);
+  triton::gpu::PaddedSharedEncodingAttr paddedPartitionLayout = nullptr;
+  if (partitionedEnc) {
+    paddedPartitionLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+        partitionedEnc.getPartitionLayout());
+  }
+
+  if (paddedEnc) {
+    // Standalone padded layout
+    return paddedEnc.getLinearComponent();
+  } else if (paddedPartitionLayout) {
+    // Partitioned layout with padded sublayout
+    auto shape = type.getShape();
+    return constructPartitionedLinearLayoutWithPadded(
+        shape, partitionedEnc, paddedPartitionLayout);
+  } else {
+    // Standard layout
+    return triton::gpu::toLinearLayout(type);
+  }
+}
+
+// Overload for MemDescType
+LinearLayout getSharedLayout(triton::gpu::MemDescType memDescTy) {
+  auto encoding = memDescTy.getEncoding();
+  auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(encoding);
+  auto partitionedEnc =
+      dyn_cast<triton::gpu::PartitionedSharedEncodingAttr>(encoding);
+  triton::gpu::PaddedSharedEncodingAttr paddedPartitionLayout = nullptr;
+  if (partitionedEnc) {
+    paddedPartitionLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+        partitionedEnc.getPartitionLayout());
+  }
+
+  if (paddedEnc) {
+    // Standalone padded layout
+    return paddedEnc.getLinearComponent();
+  } else if (paddedPartitionLayout) {
+    // Partitioned layout with padded sublayout
+    auto shape = memDescTy.getAllocShape().take_back(memDescTy.getRank());
+    return constructPartitionedLinearLayoutWithPadded(
+        shape, partitionedEnc, paddedPartitionLayout);
+  } else {
+    // Standard layout
+    return triton::gpu::toLinearLayout(memDescTy);
+  }
+}
+
 } // namespace triton::gpu
 
 SmallVector<std::pair<StringAttr, Value>>
