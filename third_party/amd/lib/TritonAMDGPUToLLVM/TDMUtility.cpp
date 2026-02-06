@@ -646,6 +646,8 @@ void fillTDMDescriptor(
   // Calculate shared memory offset using invertAndCompose of TDM and shared
   // layouts. This gives us (register, lane, warp, block) -> (offset,
   // [partition]).
+  // llvm::outs() << "sharedLayout: " << sharedLayout << "\n";
+  llvm::outs() << "tdmLayout: " << tdmLayout << "\n";
   llvm::outs() << "sharedLayout: " << sharedLayout << "\n";
   auto tdmToShared = tdmLayout.invertAndCompose(sharedLayout);
   auto sharedOffsets = applyLinearLayout(loc, rewriter, tdmToShared,

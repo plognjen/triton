@@ -177,6 +177,7 @@ private:
         totalNumElems = product<int64_t>(shapePerCTA);
       }
 
+      llvm::outs() << "totalNumElems: " << totalNumElems << "\n";
       int64_t totalBytes =
           totalNumElems *
           getIntOrFloatOrPtrBitWidth(allocType.getElementType()) / 8;

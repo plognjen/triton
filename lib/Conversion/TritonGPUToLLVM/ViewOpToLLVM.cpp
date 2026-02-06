@@ -520,6 +520,16 @@ struct MemDescIndexOpConversion
       auto paddingShifts = getPaddedSharedShifts(padEnc, bitwidth,
                                                  /*offsetInBytes=*/false);
       offset = applyPadding(loc, rewriter, offset, paddingShifts);
+    } else if (auto partEnc =
+                   dyn_cast<PartitionedSharedEncodingAttr>(dstTy.getEncoding())) {
+      // Check if partitioned layout has a padded sublayout
+      if (auto innerPadded = dyn_cast<PaddedSharedEncodingAttr>(
+              partEnc.getPartitionLayout())) {
+        auto bitwidth = dstTy.getElementTypeBitWidth();
+        auto paddingShifts = getPaddedSharedShifts(innerPadded, bitwidth,
+                                                   /*offsetInBytes=*/false);
+        offset = applyPadding(loc, rewriter, offset, paddingShifts);
+      }
     }
 
     // For partitioned tensors (when partitionDim > 0), all partitions have the
