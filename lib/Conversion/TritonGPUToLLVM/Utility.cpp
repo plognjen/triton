@@ -483,7 +483,7 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
 
 SmallVector<std::pair<unsigned, unsigned>>
 getPaddedSharedShifts(Attribute enc, unsigned bitwidth, bool offsetInBytes) {
-  auto padded = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(enc);
+  auto padded = triton::gpu::getPaddedEncoding(enc);
   if (!padded)
     return {};
 
@@ -608,12 +608,10 @@ SmallVector<Value> lowerLdSt(
 
   // Extract the layout for vectorization analysis.
   auto inDimNames = to_vector(cvt.getInDimNames());
-  SmallVector<StringAttr> offsetOutDims;
-  for (auto outDim : cvt.getOutDimNames()) {
-    if (outDim != kPartition)
-      offsetOutDims.push_back(outDim);
-  }
-  LinearLayout vectCvt = cvt.sublayout(inDimNames, offsetOutDims);
+  // Remove kPartition
+  SmallVector<StringAttr> outDims = to_vector(cvt.getOutDimNames());
+  llvm::erase(outDims, kPartition);
+  LinearLayout vectCvt = cvt.sublayout(inDimNames, outDims);
 
   auto [elemsPerVec, permutation] =
       largestVectorisation(ctx, vectCvt, bitwidth, maybeMaxVecElems);
@@ -748,20 +746,10 @@ lowerLocalLdSt(Location loc, MLIRContext *ctx,
   // partitioned)
   std::optional<int> maybeMaxVecElems;
   SmallVector<std::pair<unsigned, unsigned>> paddingShifts;
-  triton::gpu::PaddedSharedEncodingAttr paddedEnc;
-  if (auto enc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-          srcTy.getEncoding())) {
-    paddedEnc = enc;
-  } else if (auto partitioned =
-                 dyn_cast<triton::gpu::PartitionedSharedEncodingAttr>(
-                     srcTy.getEncoding())) {
-    paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-        partitioned.getPartitionLayout());
-  }
-  if (paddedEnc) {
-    maybeMaxVecElems = paddedEnc.getMinInterval();
+  if (triton::gpu::isPaddedEncoding(srcTy.getEncoding())) {
+    maybeMaxVecElems = triton::gpu::getMinInterval(srcTy.getEncoding());
     auto bitwidth = getIntOrFloatOrPtrBitWidth(llvmElemTy);
-    paddingShifts = getPaddedSharedShifts(paddedEnc, bitwidth,
+    paddingShifts = getPaddedSharedShifts(srcTy.getEncoding(), bitwidth,
                                           /*offsetInBytes=*/true);
   }
 
@@ -1101,12 +1089,11 @@ SharedMemoryObject::getMaskSpanOffsets(triton::gpu::MemDescType srcTy) {
   if (allocShape == shape) {
     return 0;
   }
-  if (auto paddedEncoding = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-          srcTy.getEncoding())) {
+  if (triton::gpu::isPaddedEncoding(srcTy.getEncoding())) {
     // Mask is used in fusion of constant part of memory operation address as
     // immediate operand. Padded layout has additional address computations
     // between main offset computation and actual memory access, which breaks
-    // constand fusing. Full mask disables this optimization.
+    // constant fusing. Full mask disables this optimization.
     return ~uint64_t(0);
   }
   auto totalLl = triton::gpu::toLinearLayout(allocShape, srcTy.getEncoding());
@@ -1145,13 +1132,11 @@ Value SharedMemoryObject::getShmemOffset(Location loc, RewriterBase &rewriter,
     return b.i32_val(0);
   }
 
-  LinearLayout ll;
   // We return the offset without the padding. The padding will be added in the
   // lowering
-  if (auto paddedSharedEncoding =
-          dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-              srcTy.getEncoding())) {
-    ll = paddedSharedEncoding.getLinearComponent();
+  LinearLayout ll;
+  if (triton::gpu::isPaddedEncoding(srcTy.getEncoding())) {
+    ll = triton::gpu::paddedLinearLayout(srcTy);
   } else {
     ll = triton::gpu::toLinearLayout(srcTy);
   }
@@ -1211,13 +1196,8 @@ SharedMemoryObject getSharedMemoryObjectFromStruct(Location loc,
   // Determine how many bases there are by counting pointer types at the start.
   // The struct layout is: [base0, base1, ..., baseN-1, offset0, offset1, ...]
   // All bases are pointer types, all offsets are i32.
-  size_t numBases = 0;
-  for (Type t : types) {
-    if (isa<LLVM::LLVMPointerType>(t))
-      ++numBases;
-    else
-      break;
-  }
+  size_t numBases = llvm::count_if(
+      types, [](Type t) { return isa<LLVM::LLVMPointerType>(t); });
   assert(numBases > 0 &&
          "SharedMemoryObject struct must have at least one base");
 
@@ -1318,23 +1298,10 @@ Value getSharedMemoryBase(Location loc, RewriterBase &rewriter,
 
   assert(op->hasAttr("allocation.offset"));
   auto offsetAttr = op->getAttr("allocation.offset");
-
-  // Fail if this operation has multiple partitions - caller should use
-  // getSharedMemoryBases() instead
-  if (auto arrayAttr = dyn_cast<ArrayAttr>(offsetAttr)) {
-    assert(arrayAttr.size() == 1 &&
-           "getSharedMemoryBase() called on partitioned tensor with multiple "
-           "bases. Use getSharedMemoryBases() instead.");
-  }
-
-  size_t offset;
-  if (auto intAttr = dyn_cast<IntegerAttr>(offsetAttr)) {
-    offset = intAttr.getValue().getZExtValue();
-  } else if (auto arrayAttr = dyn_cast<ArrayAttr>(offsetAttr)) {
-    offset = cast<IntegerAttr>(arrayAttr[0]).getValue().getZExtValue();
-  } else {
-    llvm_unreachable("allocation.offset must be IntegerAttr or ArrayAttr");
-  }
+  assert(isa<IntegerAttr>(offsetAttr) &&
+         "getSharedMemoryBase() called on partitioned tensor. "
+         "Use getSharedMemoryBases() instead.");
+  size_t offset = cast<IntegerAttr>(offsetAttr).getValue().getZExtValue();
 
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   Value offVal = b.i32_val(offset);
