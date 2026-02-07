@@ -506,7 +506,8 @@ struct MemDescIndexOpConversion
     // need to skip when we have fp4Padded=True. getShapePerCTA does not account
     // for this
     auto stride = product(
-        getAllocationShapePerCTA(dstTy.getEncoding(), dstTy.getShape()));
+        getAllocationShapePerCTA(dstTy.getEncoding(), dstTy.getShape())) / 2;
+    llvm::outs() << "stride: " << stride << "\n";
     Value offset = b.mul(op.getIndex(), b.i32_val(stride));
     auto smemObj = getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                    llvmElemTy, rewriter);
