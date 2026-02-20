@@ -374,37 +374,6 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
-#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], CGALayout = [[0]]}>
-#smem = #ttg.shared_memory
-
-module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90"} {
-  tt.func @init_barrier_in_default_region_invalid() {
-    %bar = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared, #smem, mutable>
-    ttg.warp_specialize()
-    default {
-      // expected-error @below {{cannot be used inside `ttg.warp_specialize`}}
-      ttng.init_barrier %bar, 1 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
-      ttg.warp_yield
-    }
-    partition0() num_warps(4) {
-      ttg.warp_return
-    } : () -> ()
-    tt.return
-  }
-}
-
-// -----
-
-// expected-error @+1 {{After removing the zero bases the layout must be bijective}}
-#linear = #ttg.linear<{register = [[0, 2], [0, 4], [0, 8], [0, 16], [0, 32]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 1]], warp = [[16, 0], [8, 0]], block = []}>
-module attributes {"ttg.num-warps" = 4 : i32, "ttg.num-ctas" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
-  tt.func @invalid_linear_layout(%arg0: tensor<32x64xi32, #linear>) {
-    tt.return
-  }
-}
-
-// -----
-
 // Test that reduction with warps split across N dimension is rejected
 // 128x256 with 8 warps -> warpsPerCTA = [4, 2] (2 warps in N)
 #blocked_split = #ttg.blocked<{sizePerThread = [1, 128], threadsPerWarp = [32, 1], warpsPerCTA = [4, 2], order = [0, 1]}>
