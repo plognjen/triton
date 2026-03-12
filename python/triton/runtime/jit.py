@@ -583,6 +583,7 @@ class JitFunctionInfo:
 
 def compute_cache_key(kernel_key_cache, specialization, options):
     key = (tuple(specialization), str(options))
+    print(key)
     cache_key = kernel_key_cache.get(key, None)
     if cache_key is not None:
         return cache_key

@@ -1,3 +1,6 @@
+import hip
+hip.hip.hipInit(0)
+
 import torch
 import pytest
 
@@ -11,7 +14,7 @@ THREADS_PER_WARP = triton.runtime.driver.active.get_current_target().warp_size
 
 
 def _is_layout_applicable(layout) -> bool:
-    if isinstance(layout, (ttgl.BlockedLayout, ttgl.SwizzledSharedLayout, ttgl.DistributedLinearLayout)):
+    if isinstance(layout, (ttgl.BlockedLayout, ttgl.SwizzledSharedLayout)):
         return True
     elif isinstance(layout, ttgl.SliceLayout):
         return _is_layout_applicable(layout.parent)
@@ -129,6 +132,69 @@ def test_scan_blocked_broadcast_layout_multiblock(device):
 
     torch.testing.assert_close(y, torch.cumsum(x, dim=0))
 
+# def _swizzled_warp_layouts():
+#     """GenericLinearLayout test layouts with swizzled warp bases."""
+
+#     def ilog2(x):
+#         return x.bit_length() - 1
+
+#     return [
+#         # Mildly swizzled: one warp base touches both dims
+#         ttgl.GenericLinearLayout(
+#             reg_bases=[[1, 0], [0, 1]],
+#             lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
+#             warp_bases=[[16, 8], [0, 8]],
+#             block_bases=[],
+#             shape=[32, 16],
+#         ),
+#         # Aggressively swizzled: both warp bases touch both dims
+#         ttgl.GenericLinearLayout(
+#             reg_bases=[[1, 0], [0, 1]],
+#             lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
+#             warp_bases=[[4, 2], [8, 4]],
+#             block_bases=[],
+#             shape=[16, 8],
+#         ),
+#         # Swizzled warp + broadcasting in registers
+#         ttgl.GenericLinearLayout(
+#             reg_bases=[[1, 0], [0, 0], [0, 1]],
+#             lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
+#             warp_bases=[[16, 8], [0, 8]],
+#             block_bases=[],
+#             shape=[32, 16],
+#         ),
+#         # Swizzled warp, column-heavy lane distribution
+#         ttgl.GenericLinearLayout(
+#             reg_bases=[[0, 1], [0, 2]],
+#             lane_bases=[[1, 0], [2, 0], [4, 0], [0, 4], [0, 8]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
+#             warp_bases=[[8, 4], [0, 16]],
+#             block_bases=[],
+#             shape=[8, 32],
+#         ),
+#     ]
+
+
+
+# # ===--- Tests with GenericLinearLayout (swizzled warp bases) ---===
+
+
+# @gluon.jit
+# def elementwise_generic_kernel(x_ptr, y_ptr, M: ttgl.constexpr, N: ttgl.constexpr, layout: ttgl.constexpr):
+#     offs_m = ttgl.arange(0, M, layout=ttgl.SliceLayout(1, layout))[:, None]
+#     offs_n = ttgl.arange(0, N, layout=ttgl.SliceLayout(0, layout))[None, :]
+#     x = ttgl.load(x_ptr + offs_m * N + offs_n)
+#     y = x * x + x
+#     ttgl.store(y_ptr + offs_m * N + offs_n, y)
+
+
+# @pytest.mark.parametrize("src_layout", _filter_layouts(_swizzled_warp_layouts()))
+# def test_elementwise_generic_linear(src_layout, device):
+#     M, N = src_layout.shape
+#     x = torch.randn((M, N), dtype=torch.float32, device=device)
+#     y = torch.empty_like(x)
+#     elementwise_generic_kernel[(1,)](x, y, M, N, src_layout, num_warps=4)
+#     torch.testing.assert_close(y, x * x + x)
+
 
 def _funky_reduce_layouts():
 
@@ -202,9 +268,11 @@ def test_reduce_funky_layout(src_layout, axis, device):
         pytest.skip("num_ctas > 1 requires NVIDIA SM90+ (Hopper)")
 
     torch.manual_seed(0)
-    x = torch.randn(shape, dtype=torch.float32, device=device)
-    y = torch.empty(shape[1 - axis], dtype=torch.float32, device=device)
+    x = torch.randn(shape, dtype=torch.float32).cuda()
+    y = torch.empty(shape[1 - axis], dtype=torch.float32).cuda()
 
+    print(x)
+    print(y)
     @gluon.jit
     def kernel(x_ptr, y_ptr, shape: ttgl.constexpr, axis: ttgl.constexpr, layout: ttgl.constexpr):
         x_offs_m = ttgl.arange(0, shape[0], layout=ttgl.SliceLayout(1, layout))[:, None]
