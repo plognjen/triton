@@ -1250,12 +1250,15 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
         cast<triton::gpu::SharedEncodingTrait>(smemTy.getEncoding()),
         shapePerCTA);
     bool isRowMajor = sharedOrder[0] == (sharedOrder.size() - 1);
+    auto partitionedEnc =
+        dyn_cast<triton::gpu::PartitionedSharedEncodingAttr>(encoding);
 
     mlir::LLVM::AMD::emitTDMLoadStore(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
         padInterval, padAmount, offset, dstPtrs, op.getPred(), multicastMask,
         elementType, barrierPtr, /*isLoad=*/true, sharedLayout, ctaId,
-        isRowMajor);
+        isRowMajor,
+        partitionedEnc ? std::optional(partitionedEnc) : std::nullopt);
 
     rewriter.eraseOp(op);
     return success();
@@ -1312,21 +1315,20 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
       barrierPtr = smemObj.getBase();
     }
 
-    auto paddedEnc = dyn_cast<PaddedSharedEncodingAttr>(smemTy.getEncoding());
+    auto encoding = smemTy.getEncoding();
+    auto paddedEnc = getPaddedEncoding(encoding);
     unsigned padInterval = 0;
     unsigned padAmount = 0;
-    triton::LinearLayout sharedLayout;
+    triton::LinearLayout sharedLayout =
+        isPaddedEncoding(encoding) ? paddedLinearLayout(smemTy)
+                                   : triton::gpu::toLinearLayout(smemTy);
 
     if (paddedEnc) {
       // Verifier ensures that there is exactly one interval-padding pair
       padInterval = paddedEnc.getIntervals()[0];
       padAmount = paddedEnc.getPaddings()[0];
-      sharedLayout = paddedEnc.getLinearComponent();
-    } else {
-      sharedLayout = triton::gpu::toLinearLayout(smemTy);
     }
 
-    // Verifier ensures smem is not usind a PaddedSharedEncodingAttr
     auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
 
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
@@ -1334,13 +1336,16 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
         cast<triton::gpu::SharedEncodingTrait>(smemTy.getEncoding()),
         shapePerCTA);
     bool isRowMajor = sharedOrder[0] == (sharedOrder.size() - 1);
+    auto partitionedEnc =
+        dyn_cast<triton::gpu::PartitionedSharedEncodingAttr>(encoding);
 
     Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
     mlir::LLVM::AMD::emitTDMLoadStore(
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
         padInterval, padAmount, offset, srcPtrs, pred,
         /*multicastMask=*/{}, elementType, barrierPtr,
-        /*isLoad=*/false, sharedLayout, ctaId, isRowMajor);
+        /*isLoad=*/false, sharedLayout, ctaId, isRowMajor,
+        partitionedEnc ? std::optional(partitionedEnc) : std::nullopt);
 
     rewriter.eraseOp(op);
     return success();
