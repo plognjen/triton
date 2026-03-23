@@ -720,7 +720,8 @@ def TTG_BarrierOp : TTG_Op<"barrier"> {
     ```
   }];
 
-  let arguments = (ins TTG_AddrSpace:$addrSpace);
+  let arguments = (ins TTG_AddrSpace:$addrSpace,
+                       DefaultValuedAttr<BoolAttr, "false">:$cta);
   let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
@@ -735,6 +736,7 @@ def TTG_BarrierOp : TTG_Op<"barrier"> {
     bool hasGlobalWrite() { return hasAddrSpace(AddrSpace::GlobalWrite); }
     bool hasTensorRead() { return hasAddrSpace(AddrSpace::TensorRead); }
     bool hasTensorWrite() { return hasAddrSpace(AddrSpace::TensorWrite); }
+    bool isCTA() { return getCta(); }
   }];
 }
 
