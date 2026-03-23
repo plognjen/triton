@@ -12,6 +12,8 @@ from triton.experimental import gluon
 import triton.experimental.gluon.language as ttgl
 
 # Handle imports for both pytest (module context) and direct execution
+from triton.experimental.gluon.language.amd.gfx1250 import PartitionedSharedLayout
+
 try:
     from .gfx1250_utils import static_profile
     from .f16_gemm_common_gfx1250 import (
@@ -106,9 +108,8 @@ def gemm_tdm_pipelined_warp_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
 
 
 @gluon.jit
-def issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
-                       HALF_M: ttgl.constexpr, BLOCK_K: ttgl.constexpr,
-                       NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
+def issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer, HALF_M: ttgl.constexpr,
+                       BLOCK_K: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
     buf_idx = producer % NUM_BUFFERS
     ttgl.amd.gfx1250.tdm.async_load(a_desc0, [0, producer * BLOCK_K], a_buffer0.index(buf_idx))
     ttgl.amd.gfx1250.tdm.async_load(a_desc1, [HALF_M, producer * BLOCK_K], a_buffer1.index(buf_idx))
@@ -120,13 +121,10 @@ def issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1,
 
 
 @gluon.jit
-def ws_pipe0_f16(a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
-                 c_ptr, M, N, pid_m, pid_n, stride_cm, stride_cn, loop_ub,
-                 OPERAND_LAYOUT_A: ttgl.constexpr, OPERAND_LAYOUT_B: ttgl.constexpr,
-                 WMMA_LAYOUT: ttgl.constexpr,
-                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,
-                 HALF_M: ttgl.constexpr,
-                 NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
+def ws_pipe0_f16(a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer, c_ptr, M, N, pid_m, pid_n, stride_cm,
+                 stride_cn, loop_ub, OPERAND_LAYOUT_A: ttgl.constexpr, OPERAND_LAYOUT_B: ttgl.constexpr,
+                 WMMA_LAYOUT: ttgl.constexpr, BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,
+                 HALF_M: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
     """Default partition: TDM producer (both M halves + B) + WMMA compute (top half)."""
     NUM_LOADS: ttgl.constexpr = 3
     producer = 0
@@ -134,8 +132,8 @@ def ws_pipe0_f16(a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
     accumulator = ttgl.zeros((HALF_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
 
     for _ in ttgl.static_range(NUM_BUFFERS - 1):
-        producer = issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
-                                     HALF_M, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
+        producer = issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer, HALF_M,
+                                      BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
 
     ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 2) * NUM_LOADS)
     ttgl.sched_barrier(0)
@@ -143,8 +141,8 @@ def ws_pipe0_f16(a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
     ttgl.sched_barrier(0)
     ttgl.assume(loop_ub >= 0)
     for _ in range(0, loop_ub):
-        producer = issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
-                                     HALF_M, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
+        producer = issue_loads_msplit(producer, a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer, HALF_M,
+                                      BLOCK_K, NUM_BUFFERS, TRANSPOSE_B)
         consumer, a, b = lds_load(consumer, a_buffer0, OPERAND_LAYOUT_A, b_buffer, OPERAND_LAYOUT_B, NUM_BUFFERS,
                                   TRANSPOSE_B)
         ttgl.sched_barrier(0)
@@ -159,7 +157,7 @@ def ws_pipe0_f16(a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
     ttgl.sched_barrier(0)
     ttgl.barrier(cta=True, addrspace=0b00000)
     ttgl.sched_barrier(0)
-    
+
     for i in ttgl.static_range(NUM_BUFFERS - 1):
         ttgl.sched_barrier(0)
         ttgl.amd.gfx1250.tdm.async_wait((NUM_BUFFERS - 1 - i) * NUM_LOADS)
@@ -176,13 +174,10 @@ def ws_pipe0_f16(a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
 
 
 @gluon.jit
-def ws_pipe1_f16(a_buffer1, b_buffer,
-                 c_ptr, M, N, pid_m, pid_n, stride_cm, stride_cn, loop_ub,
-                 OPERAND_LAYOUT_A: ttgl.constexpr, OPERAND_LAYOUT_B: ttgl.constexpr,
-                 WMMA_LAYOUT: ttgl.constexpr,
-                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                 HALF_M: ttgl.constexpr,
-                 NUM_BUFFERS: ttgl.constexpr, TRANSPOSE_B: ttgl.constexpr):
+def ws_pipe1_f16(a_buffer1, b_buffer, c_ptr, M, N, pid_m, pid_n, stride_cm, stride_cn, loop_ub,
+                 OPERAND_LAYOUT_A: ttgl.constexpr, OPERAND_LAYOUT_B: ttgl.constexpr, WMMA_LAYOUT: ttgl.constexpr,
+                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, HALF_M: ttgl.constexpr, NUM_BUFFERS: ttgl.constexpr,
+                 TRANSPOSE_B: ttgl.constexpr):
     """Worker partition: WMMA compute (bottom half), no TDM loads."""
     consumer = 0
     accumulator = ttgl.zeros((HALF_M, BLOCK_N), dtype=c_ptr.type.element_ty, layout=WMMA_LAYOUT)
@@ -219,16 +214,16 @@ def ws_pipe1_f16(a_buffer1, b_buffer,
 
 @gluon.jit
 def gemm_tdm_pipelined_warp_pipelined_ws_kernel(a_ptr, b_ptr, c_ptr,  #
-                                                 M, N, K,  #
-                                                 stride_am, stride_ak,  #
-                                                 stride_bk, stride_bn,  #
-                                                 stride_cm, stride_cn,  #
-                                                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
-                                                 BLOCK_K: ttgl.constexpr,  #
-                                                 NUM_BUFFERS: ttgl.constexpr,  #
-                                                 TRANSPOSE_B: ttgl.constexpr,  #
-                                                 WARP_BASES: ttgl.constexpr,  #
-                                                 NUM_WARPS: ttgl.constexpr):
+                                                M, N, K,  #
+                                                stride_am, stride_ak,  #
+                                                stride_bk, stride_bn,  #
+                                                stride_cm, stride_cn,  #
+                                                BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,
+                                                BLOCK_K: ttgl.constexpr,  #
+                                                NUM_BUFFERS: ttgl.constexpr,  #
+                                                TRANSPOSE_B: ttgl.constexpr,  #
+                                                WARP_BASES: ttgl.constexpr,  #
+                                                NUM_WARPS: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -236,10 +231,15 @@ def gemm_tdm_pipelined_warp_pipelined_ws_kernel(a_ptr, b_ptr, c_ptr,  #
     ttgl.static_assert(NUM_BUFFERS >= 2, "NUM_BUFFERS must be at least 2")
 
     HALF_M: ttgl.constexpr = BLOCK_M // 2
-    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, WARP_BASES, [], [16, 16, 32])
+    # WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, WARP_BASES, [], [16, 16, 32])
+    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[2, 1], [1, 0]], [[2, 0]], [16, 16, 32])
 
-    SHARED_LAYOUT_A_HALF: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for(
-        [[BLOCK_K, 8]], [HALF_M, BLOCK_K], [1, 0])
+    SUBLAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [32, BLOCK_K], [1, 0])
+    SHARED_LAYOUT_A_HALF: ttgl.constexpr = PartitionedSharedLayout(num_partitions=2, num_groups=2, partition_dim=0,
+                                                                   partition_layout=SUBLAYOUT)
+
+    # SHARED_LAYOUT_A_HALF: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for(
+    #     [[BLOCK_K, 8]], [HALF_M, BLOCK_K], [1, 0])
     shared_layouts: ttgl.constexpr = create_shared_layouts(BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B)
     SHARED_LAYOUT_B: ttgl.constexpr = shared_layouts[1]
     OPERAND_LAYOUT_A: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
@@ -253,41 +253,38 @@ def gemm_tdm_pipelined_warp_pipelined_ws_kernel(a_ptr, b_ptr, c_ptr,  #
     off_am = pid_m * BLOCK_M * stride_am
     off_bn = pid_n * BLOCK_N * stride_bn
 
-    a_desc0 = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(
-        base=a_ptr + off_am, shape=(M, K), strides=(stride_am, stride_ak),
-        block_shape=(HALF_M, BLOCK_K), layout=SHARED_LAYOUT_A_HALF)
-    a_desc1 = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(
-        base=a_ptr + off_am, shape=(M, K), strides=(stride_am, stride_ak),
-        block_shape=(HALF_M, BLOCK_K), layout=SHARED_LAYOUT_A_HALF)
+    a_desc0 = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr + off_am, shape=(M, K),
+                                                          strides=(stride_am, stride_ak), block_shape=(HALF_M, BLOCK_K),
+                                                          layout=SHARED_LAYOUT_A_HALF)
+    a_desc1 = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr + off_am, shape=(M, K),
+                                                          strides=(stride_am, stride_ak), block_shape=(HALF_M, BLOCK_K),
+                                                          layout=SHARED_LAYOUT_A_HALF)
 
     if not TRANSPOSE_B:
-        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(
-            base=b_ptr + off_bn, shape=(K, N), strides=(stride_bk, stride_bn),
-            block_shape=(BLOCK_K, BLOCK_N), layout=SHARED_LAYOUT_B)
+        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=b_ptr + off_bn, shape=(K, N),
+                                                             strides=(stride_bk, stride_bn),
+                                                             block_shape=(BLOCK_K, BLOCK_N), layout=SHARED_LAYOUT_B)
     else:
-        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(
-            base=b_ptr + off_bn, shape=(N, K), strides=(stride_bn, stride_bk),
-            block_shape=(BLOCK_N, BLOCK_K), layout=SHARED_LAYOUT_B)
+        b_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=b_ptr + off_bn, shape=(N, K),
+                                                             strides=(stride_bn, stride_bk),
+                                                             block_shape=(BLOCK_N, BLOCK_K), layout=SHARED_LAYOUT_B)
 
     a_buffer0 = ttgl.allocate_shared_memory(a_desc0.dtype, shape=[NUM_BUFFERS] + a_desc0.block_shape,
                                             layout=a_desc0.layout)
     a_buffer1 = ttgl.allocate_shared_memory(a_desc1.dtype, shape=[NUM_BUFFERS] + a_desc1.block_shape,
                                             layout=a_desc1.layout)
-    b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape,
-                                           layout=b_desc.layout)
+    b_buffer = ttgl.allocate_shared_memory(b_desc.dtype, shape=[NUM_BUFFERS] + b_desc.block_shape, layout=b_desc.layout)
 
     loop_ub = ttgl.cdiv(K, BLOCK_K) - (NUM_BUFFERS - 1)
 
     ttgl.warp_specialize(
         [
-            (ws_pipe0_f16, (a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer,
-                            c_ptr, M, N, pid_m, pid_n, stride_cm, stride_cn, loop_ub,
-                            OPERAND_LAYOUT_A, OPERAND_LAYOUT_B, WMMA_LAYOUT,
-                            BLOCK_M, BLOCK_N, BLOCK_K, HALF_M, NUM_BUFFERS, TRANSPOSE_B)),
-            (ws_pipe1_f16, (a_buffer1, b_buffer,
-                            c_ptr, M, N, pid_m, pid_n, stride_cm, stride_cn, loop_ub,
-                            OPERAND_LAYOUT_A, OPERAND_LAYOUT_B, WMMA_LAYOUT,
-                            BLOCK_M, BLOCK_N, HALF_M, NUM_BUFFERS, TRANSPOSE_B)),
+            (ws_pipe0_f16, (a_desc0, a_desc1, b_desc, a_buffer0, a_buffer1, b_buffer, c_ptr, M, N, pid_m, pid_n,
+                            stride_cm, stride_cn, loop_ub, OPERAND_LAYOUT_A, OPERAND_LAYOUT_B, WMMA_LAYOUT, BLOCK_M,
+                            BLOCK_N, BLOCK_K, HALF_M, NUM_BUFFERS, TRANSPOSE_B)),
+            (ws_pipe1_f16,
+             (a_buffer1, b_buffer, c_ptr, M, N, pid_m, pid_n, stride_cm, stride_cn, loop_ub, OPERAND_LAYOUT_A,
+              OPERAND_LAYOUT_B, WMMA_LAYOUT, BLOCK_M, BLOCK_N, HALF_M, NUM_BUFFERS, TRANSPOSE_B)),
         ],
         [NUM_WARPS],
     )
@@ -418,7 +415,9 @@ if __name__ == "__main__":
 
     if args.ws:
         NUM_WARPS = 4
-        print(f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, WS=True")
+        print(
+            f"({M=}, {N=}, {K=}), ({BLOCK_M=}, {BLOCK_N=}, {BLOCK_K=}), {TRANSPOSE_B=}, {NUM_WARPS=}, {NUM_BUFFERS=}, WS=True"
+        )
         test_runtime_gemm_tdm_warp_pipelined_ws(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, TRANSPOSE_B, M, N, K, DUMP)
     else:
         NUM_WARPS = 8

@@ -23,11 +23,28 @@
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
 // Returns partition index when partitionSize > 0, otherwise returns 0.
-static size_t getPartitionIndex(size_t offset, size_t partitionSize) {
-  if (partitionSize == 0)
-    return 0;
-  return offset / partitionSize;
+// Returns true if buffers [o1, o1+s1) and [o2, o2+s2) occupy at least one
+// common physical partition.
+static bool partitionsOverlap(size_t o1, size_t s1, size_t o2, size_t s2,
+                              size_t partitionSize) {
+  if (partitionSize == 0 || s1 == 0 || s2 == 0)
+    return false;
+  size_t first1 = o1 / partitionSize;
+  size_t last1 = (o1 + s1 - 1) / partitionSize;
+  size_t first2 = o2 / partitionSize;
+  size_t last2 = (o2 + s2 - 1) / partitionSize;
+  return first1 <= last2 && first2 <= last1;
 }
+
+// Returns the first offset that is past all partitions occupied by a buffer
+// at [offset, offset+size).
+static size_t getNextFreePartitionStart(size_t offset, size_t size,
+                                        size_t partitionSize) {
+  assert(partitionSize > 0 && size > 0);
+  size_t lastPartition = (offset + size - 1) / partitionSize;
+  return (lastPartition + 1) * partitionSize;
+}
+static int count = 0;
 
 namespace ttng = mlir::triton::nvidia_gpu;
 
@@ -608,8 +625,8 @@ private:
       // Only check this when partitioning is enabled (partitionSize > 0).
       if (partitionSize > 0) {
         for (auto *neighbor : x->neighbors) {
-          if (getPartitionIndex(x->offset, partitionSize) ==
-              getPartitionIndex(neighbor->offset, partitionSize)) {
+          if (partitionsOverlap(x->offset, x->size, neighbor->offset,
+                                neighbor->size, partitionSize)) {
             interference[x].insert(neighbor);
           }
         }
@@ -656,29 +673,38 @@ private:
     // color2: [8, 12) -> [8 + 2 * 15, 12 + 2 * 15) -> [38, 42)
     // TODO(Keren): We are wasting memory here.
     // Nodes with color2 can actually start with 24.
+    DenseSet<BufferT *> processed;
     for (auto x : buffers) {
       size_t newOffset = 0;
       for (auto y : interference.lookup(x)) {
-        // Check if y is a partition neighbor of x
         bool isPartitionNeighbor =
             std::find(x->neighbors.begin(), x->neighbors.end(), y) !=
             x->neighbors.end();
-        if (isPartitionNeighbor && partitionSize > 0) {
-          // For partition neighbors, bump to the next partition
-          // boundary to ensure they are in different physical partitions
-          size_t nextPartitionStart =
-              (getPartitionIndex(y->offset, partitionSize) + 1) * partitionSize;
-          newOffset = std::max(newOffset, nextPartitionStart);
-        } else {
+        if (isPartitionNeighbor && partitionSize > 0 && processed.contains(y)) {
+          // y is finalized — only bump x if they still share a physical
+          // partition (the conflict may already be resolved if y was moved
+          // for other reasons).
+          if (partitionsOverlap(x->offset, x->size, y->offset, y->size,
+                                partitionSize)) {
+            size_t pastYMem = y->offset + y->size;
+            size_t pastYPart =
+                getNextFreePartitionStart(y->offset, y->size, partitionSize);
+            newOffset = std::max(newOffset, std::max(pastYMem, pastYPart));
+          }
+        } else if (!isPartitionNeighbor) {
           // Regular interference - just move past the interfering buffer
           newOffset = std::max(newOffset, y->offset + y->size);
         }
+        // Partition neighbor not yet processed — skip; when y is processed
+        // later it will bump itself past x.
       }
       if (colors.lookup(x) != 0)
         x->setOffsetAligned(newOffset);
       allocation->sharedMemorySize =
           std::max(allocation->sharedMemorySize, x->offset + x->size);
+      processed.insert(x);
     }
+    dumpBuffers();
     LLVM_DEBUG(dumpBuffers());
   }
 

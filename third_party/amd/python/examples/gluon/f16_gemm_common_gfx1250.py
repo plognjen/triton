@@ -9,6 +9,7 @@ persistent and StreamK GEMM implementations.
 from triton.experimental import gluon
 from triton.language.core import _aggregate as aggregate
 import triton.experimental.gluon.language as ttgl
+from triton.experimental.gluon.language.amd.gfx1250 import PartitionedSharedLayout
 
 
 @gluon.jit
@@ -74,9 +75,19 @@ def create_shared_layouts(BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOC
     if not TRANSPOSE_B:
         SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 16]], [BLOCK_K, BLOCK_N],
                                                                                     [1, 0])
+        # SUBLAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 16]], [BLOCK_K, 16],
+        #                                                                             [1, 0])
+
+        # SHARED_LAYOUT_B: ttgl.constexpr = PartitionedSharedLayout(
+        #     num_partitions=2, num_groups=8, partition_dim=1,
+        #     partition_layout=SUBLAYOUT)
+
     else:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_N, BLOCK_K],
-                                                                                    [1, 0])
+        # SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_N, BLOCK_K],
+        #                                                                             [1, 0])
+        SUBLAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [16, BLOCK_K], [1, 0])
+        SHARED_LAYOUT_B: ttgl.constexpr = PartitionedSharedLayout(num_partitions=2, num_groups=8, partition_dim=0,
+                                                                  partition_layout=SUBLAYOUT)
 
     return (SHARED_LAYOUT_A, SHARED_LAYOUT_B)
 

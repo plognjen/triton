@@ -2872,6 +2872,28 @@ struct TritonGPUInferLayoutInterface
           applyPermutation(invOrderUnsigned, enc.getOrder()), cgaLayout);
       return success();
     }
+
+    if (auto enc = dyn_cast<PartitionedSharedEncodingAttr>(operandEncoding)) {
+      unsigned partitionDim = enc.getPartitionDim();
+      unsigned numPieces = enc.getNumLogicalPieces();
+
+      SmallVector<int64_t> pieceShape(shape.begin(), shape.end());
+      pieceShape[partitionDim] /= numPieces;
+
+      Attribute transposedInnerEncoding;
+      if (failed(inferTransOpEncoding(enc.getPartitionLayout(), pieceShape,
+                                      order, transposedInnerEncoding, loc)))
+        return failure();
+
+      unsigned newPartitionDim = invOrderUnsigned[partitionDim];
+      auto transposedInnerShared =
+          cast<SharedEncodingTrait>(transposedInnerEncoding);
+      resultEncoding = PartitionedSharedEncodingAttr::get(
+          ctx, enc.getNumPartitions(), enc.getNumGroups(), newPartitionDim,
+          transposedInnerShared);
+      return success();
+    }
+
     // Generic case
     auto padded = dyn_cast<PaddedSharedEncodingAttr>(operandEncoding);
 
