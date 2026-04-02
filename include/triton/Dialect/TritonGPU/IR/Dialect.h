@@ -89,6 +89,7 @@ private:
 
 using LinearLayoutCache = Cache<CacheKey, LinearLayout>;
 using LinearEncodingCache = Cache<CacheKey, LinearEncodingAttr>;
+using DistributedEncodingCache = Cache<CacheKey, Attribute>;
 } // namespace mlir::triton::gpu
 
 #define GET_OP_CLASSES
@@ -101,10 +102,43 @@ struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
   SideEffects::Resource *getParent() const override { return nullptr; }
 };
 
+// Check whether after removing broadcast bases the flattened layout is a
+// permutation matrix (each non-broadcast basis maps to a distinct power-of-2).
+bool isPermutationMatrixLayout(const LinearLayout &ll);
+
+// Create LinearEncodingAttr if the layout is compatible, otherwise
+// GenericLinearEncodingAttr.
+Attribute makeEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll);
+
 // Convert a distributed layout to a linear encoding
 LinearEncodingAttr toLinearEncoding(RankedTensorType type);
 LinearEncodingAttr toLinearEncoding(DistributedEncodingTrait layout,
                                     ArrayRef<int64_t> shape);
+
+// Convert a distributed layout to LinearEncodingAttr if the layout satisfies
+// its constraints (non-swizzled bases, bijective after removing broadcasts),
+// otherwise fall back to GenericLinearEncodingAttr.
+Attribute toLinearOrGenericEncoding(RankedTensorType type);
+Attribute toLinearOrGenericEncoding(DistributedEncodingTrait layout,
+                                    ArrayRef<int64_t> shape);
+
+// Dispatch helper: converts any distributed layout to a linear encoding
+// (LinearEncodingAttr or GenericLinearEncodingAttr) and invokes the callable
+// on the result cast to LinearEncodingTrait.
+template <typename F>
+auto dispatchEncoding(Attribute layout, ArrayRef<int64_t> shape, F &&f)
+    -> decltype(f(std::declval<LinearEncodingTrait>())) {
+  auto enc =
+      toLinearOrGenericEncoding(cast<DistributedEncodingTrait>(layout), shape);
+  return f(cast<LinearEncodingTrait>(enc));
+}
+
+template <typename F>
+auto dispatchEncoding(RankedTensorType type, F &&f)
+    -> decltype(f(std::declval<LinearEncodingTrait>())) {
+  return dispatchEncoding(type.getEncoding(), type.getShape(),
+                          std::forward<F>(f));
+}
 
 unsigned getTotalElemsPerThread(Type type);
 
