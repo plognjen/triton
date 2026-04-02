@@ -86,6 +86,123 @@ We call each individual tile "rep".
   ];
 }
 
+def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
+  let cppNamespace = "::mlir::triton::gpu";
+  let description = [{
+    Common trait for distributed encodings backed by a LinearLayout
+    (LinearEncodingAttr and GenericLinearEncodingAttr).
+  }];
+  let methods = [
+    InterfaceMethod<"Get the underlying linear layout.",
+                    "const LinearLayout &", "getLinearLayout">,
+
+    // Shared defaults delegating to free functions in linear_encoding_impl.
+    InterfaceMethod<"Get the bases per dimension for a given input dimension.",
+                    "SmallVector<unsigned>", "basesPerDim",
+                    (ins "StringAttr":$dimName,
+                         "bool":$skipBroadcast),
+                    [{}], [{
+      return ::mlir::triton::gpu::linear_encoding_impl::basesPerDim(
+          $_attr.getLinearLayout(), dimName, skipBroadcast);
+    }]>,
+    InterfaceMethod<"Get the dimension order for a given input dimension.",
+                    "SmallVector<unsigned>", "orderPerDim",
+                    (ins "StringAttr":$dimName,
+                         "ArrayRef<unsigned>":$defaultOrder),
+                    [{}], [{
+      return ::mlir::triton::gpu::linear_encoding_impl::orderPerDim(
+          $_attr.getLinearLayout(), dimName, defaultOrder);
+    }]>,
+    InterfaceMethod<"Get the layout order.",
+                    "SmallVector<unsigned>", "getOrder",
+                    (ins), [{}], [{
+      const auto &ll = $_attr.getLinearLayout();
+      auto rank = ll.getNumOutDims();
+      SmallVector<unsigned> defaultOrd(rank);
+      for (unsigned i = 0; i < rank; ++i)
+        defaultOrd[i] = rank - 1 - i;
+      return $_attr.orderPerDim(
+          StringAttr::get($_attr.getContext(), "register"), defaultOrd);
+    }]>,
+    InterfaceMethod<"Get contiguity for a given input dimension.",
+                    "SmallVector<unsigned>", "getContig",
+                    (ins "const char *":$inDim,
+                         "SmallVector<unsigned>":$lowerContig),
+                    [{}], [{
+      return ::mlir::triton::gpu::linear_encoding_impl::getContig(
+          $_attr.getLinearLayout(), $_attr.getContext(), inDim, lowerContig,
+          $_attr.getOrder());
+    }]>,
+    InterfaceMethod<"Get size per thread.",
+                    "SmallVector<unsigned>", "getSizePerThread",
+                    (ins), [{}], [{
+      auto cgaSplitNum = $_attr.getCGALayout().getCTASplitNum();
+      return ::mlir::triton::gpu::linear_encoding_impl::getSizePerThread(
+          $_attr.getLinearLayout(), $_attr.getContext(), cgaSplitNum);
+    }]>,
+    InterfaceMethod<"Get the CGA layout.",
+                    "CGAEncodingAttr", "getCGALayout",
+                    (ins), [{}], [{
+      return ::mlir::triton::gpu::linear_encoding_impl::getCGALayout(
+          $_attr.getLinearLayout(), $_attr.getContext());
+    }]>,
+    InterfaceMethod<"Convert to LinearLayout.",
+                    "LinearLayout", "toLinearLayout",
+                    (ins "ArrayRef<int64_t>":$shape),
+                    [{}], [{
+      auto repOrder = $_attr.getRepOrder();
+      return ::mlir::triton::gpu::linear_encoding_impl::toLinearLayout(
+          $_attr.getLinearLayout(), repOrder, shape);
+    }]>,
+
+    // Simple inline defaults built on top of the above.
+    InterfaceMethod<"Get threads per warp in each dimension.",
+                    "SmallVector<unsigned>", "getThreadsPerWarp",
+                    (ins), [{}], [{
+      return $_attr.basesPerDim(
+          StringAttr::get($_attr.getContext(), "lane"), /*skipBroadcast=*/true);
+    }]>,
+    InterfaceMethod<"Get the thread order.",
+                    "SmallVector<unsigned>", "getThreadOrder",
+                    (ins), [{}], [{
+      return $_attr.orderPerDim(
+          StringAttr::get($_attr.getContext(), "lane"), $_attr.getOrder());
+    }]>,
+    InterfaceMethod<"Get contiguity per thread.",
+                    "SmallVector<unsigned>", "getContigPerThread",
+                    (ins), [{}], [{
+      SmallVector<unsigned> c($_attr.getOrder().size(), 1);
+      return $_attr.getContig("register", c);
+    }]>,
+    InterfaceMethod<"Get contiguity per warp.",
+                    "SmallVector<unsigned>", "getContigPerWarp",
+                    (ins), [{}], [{
+      return $_attr.getContig("lane", $_attr.getContigPerThread());
+    }]>,
+    InterfaceMethod<"Get the rep order (also satisfies DistributedEncodingTrait).",
+                    "SmallVector<unsigned>", "getRepOrder",
+                    (ins), [{}], [{
+      return $_attr.getOrder();
+    }]>,
+    InterfaceMethod<"Get elements per thread (overrides DistributedEncodingTrait default).",
+                    "SmallVector<unsigned>", "getElemsPerThread",
+                    (ins "ArrayRef<int64_t>":$shape),
+                    [{}], [{
+      return ::mlir::triton::gpu::linear_encoding_impl::getElemsPerThread(
+          $_attr.getLinearLayout(), $_attr.getContext(), $_attr.getOrder(), shape);
+    }]>,
+    InterfaceMethod<"Get total elements per thread (overrides DistributedEncodingTrait default).",
+                    "unsigned", "getTotalElemsPerThread",
+                    (ins "ArrayRef<int64_t>":$shape),
+                    [{}], [{
+      return ::mlir::triton::gpu::linear_encoding_impl::getTotalElemsPerThread(
+          $_attr.getLinearLayout(), $_attr.getContext(), $_attr.getOrder(), shape);
+    }]>,
+  ];
+}
+def DeclareLinearEncodingMethods : DeclareAttrInterfaceMethods<
+  LinearEncodingTrait, ["getLinearLayout"]>;
+
 def MmaEncodingTrait : AttrInterface<"MmaEncodingTrait"> {
   let cppNamespace = "::mlir::triton::gpu";
   let methods = [
