@@ -650,6 +650,10 @@ class LinearDistributedEncoding<string name, string attrMnemonic,
                   traits)> {
 
   let parameters = (ins LinearLayoutParam:$linearLayout);
+
+  code extraLinearDistributedDeclaration = [{
+    unsigned getRank() const { return getLinearLayout().getNumOutDims(); }
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -664,7 +668,7 @@ def LinearEncodingAttr
     See the docs in LinearLayout.h for the definition of linear layouts.
   }];
 
-  let extraClassDeclaration = [{
+  let extraClassDeclaration = extraLinearDistributedDeclaration # [{
     SmallVector<unsigned> getWarpsPerCTA() const;
     SmallVector<unsigned> getWarpOrder() const;
   }];
@@ -701,6 +705,8 @@ def GenericLinearEncodingAttr
     non-zero output component per basis vector), which preserves existing
     within-thread, within-warp, and CGA lowering paths.
   }];
+
+  let extraClassDeclaration = extraLinearDistributedDeclaration;
 
   let genVerifyDecl = 1;
   let hasCustomAssemblyFormat = 1;
