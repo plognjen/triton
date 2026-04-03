@@ -88,40 +88,24 @@ Attribute makeEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll) {
   return GenericLinearEncodingAttr::get(ctx, std::move(ll));
 }
 
-Attribute TritonGPUDialect::toLinearOrGenericEncoding(ArrayRef<int64_t> shape,
-                                                      Attribute layout) {
-  CacheKey key{std::vector<int64_t>(shape.begin(), shape.end()), layout};
-  if (auto result = deCache.get(key))
-    return *result;
+static GenericLinearEncodingAttr
+toGenericLinearEncoding(Attribute layout, ArrayRef<int64_t> shape) {
   auto ll = toLinearLayout(shape, layout);
-  auto enc = makeEncodingFromLinearLayout(layout.getContext(), std::move(ll));
-  deCache.set(key, enc);
-  return enc;
+  return GenericLinearEncodingAttr::get(layout.getContext(), std::move(ll));
 }
 
-Attribute toLinearOrGenericEncoding(DistributedEncodingTrait layout,
-                                    ArrayRef<int64_t> shape) {
-  auto *ctx = layout.getContext();
-  return ctx->getLoadedDialect<TritonGPUDialect>()->toLinearOrGenericEncoding(
-      shape, layout);
-}
-
-Attribute toLinearOrGenericEncoding(RankedTensorType type) {
-  auto *ctx = type.getContext();
-  return ctx->getLoadedDialect<TritonGPUDialect>()->toLinearOrGenericEncoding(
-      type.getShape(), type.getEncoding());
+static GenericLinearEncodingAttr
+toGenericLinearEncoding(RankedTensorType type) {
+  return toGenericLinearEncoding(type.getEncoding(), type.getShape());
 }
 
 unsigned getTotalElemsPerThread(Attribute layout, ArrayRef<int64_t> shape) {
-  return dispatchEncoding(layout, shape, [&](auto enc) {
-    return enc.getTotalElemsPerThread(shape);
-  });
+  return toGenericLinearEncoding(layout, shape).getTotalElemsPerThread(shape);
 }
 
 SmallVector<unsigned> getElemsPerThread(Attribute layout,
                                         ArrayRef<int64_t> shape) {
-  return dispatchEncoding(
-      layout, shape, [&](auto enc) { return enc.getElemsPerThread(shape); });
+  return toGenericLinearEncoding(layout, shape).getElemsPerThread(shape);
 }
 
 SmallVector<unsigned> getElemsPerThread(Type type) {
@@ -141,8 +125,7 @@ unsigned getTotalElemsPerThread(Type type) {
 
 SmallVector<unsigned> getThreadsPerWarp(Attribute layout,
                                         ArrayRef<int64_t> shape) {
-  return dispatchEncoding(layout, shape,
-                          [](auto enc) { return enc.getThreadsPerWarp(); });
+  return toGenericLinearEncoding(layout, shape).getThreadsPerWarp();
 }
 
 SmallVector<unsigned> getWarpsPerCTA(Attribute layout,
@@ -152,8 +135,7 @@ SmallVector<unsigned> getWarpsPerCTA(Attribute layout,
 }
 
 SmallVector<unsigned> getContigPerThread(RankedTensorType type) {
-  return dispatchEncoding(type,
-                          [](auto enc) { return enc.getContigPerThread(); });
+  return toGenericLinearEncoding(type).getContigPerThread();
 }
 
 bool isExpensiveView(ArrayRef<int64_t> srcShape, Attribute srcEncoding,
@@ -257,36 +239,29 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
 
 SmallVector<unsigned> getOrder(DistributedEncodingTrait layout,
                                ArrayRef<int64_t> shape) {
-  return dispatchEncoding(Attribute(layout), shape,
-                          [](auto enc) { return enc.getOrder(); });
+  return toGenericLinearEncoding(Attribute(layout), shape).getOrder();
 }
 
 SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
                                         ArrayRef<int64_t> shape) {
-  return dispatchEncoding(Attribute(layout), shape,
-                          [&](auto enc) -> SmallVector<unsigned> {
-                            auto order = enc.getOrder();
-                            auto threadOrder = enc.getThreadOrder();
-                            if (order == threadOrder)
-                              return order;
-                            // Heuristic:
-                            // If the element contiguity does not align with the
-                            // thread order because the thread order dimension
-                            // has contiguity of 1---meaning that the order
-                            // position of this dimension is irrelevant---we
-                            // prefer to use the thread order for the memory
-                            // layout
-                            auto contig = enc.getElemsPerThread(shape);
-                            if (contig[threadOrder[0]] == 1)
-                              return threadOrder;
-                            return order;
-                          });
+  auto enc = toGenericLinearEncoding(Attribute(layout), shape);
+  auto order = enc.getOrder();
+  auto threadOrder = enc.getThreadOrder();
+  if (order == threadOrder)
+    return order;
+  // If the element contiguity does not align with the thread order because the
+  // thread order dimension has contiguity of 1---meaning that the order
+  // position of this dimension is irrelevant---we prefer to use the thread
+  // order for the memory layout
+  auto contig = enc.getElemsPerThread(shape);
+  if (contig[threadOrder[0]] == 1)
+    return threadOrder;
+  return order;
 }
 
 SmallVector<unsigned> getThreadOrder(DistributedEncodingTrait layout,
                                      ArrayRef<int64_t> shape) {
-  return dispatchEncoding(Attribute(layout), shape,
-                          [](auto enc) { return enc.getThreadOrder(); });
+  return toGenericLinearEncoding(Attribute(layout), shape).getThreadOrder();
 }
 
 SmallVector<unsigned> getWarpOrder(DistributedEncodingTrait layout,
