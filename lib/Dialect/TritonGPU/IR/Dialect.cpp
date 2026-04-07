@@ -109,10 +109,6 @@ Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
            "Expected non-permutation layout from this source encoding");
     return GenericLinearEncodingAttr::get(ctx, std::move(ll));
   }
-  assert(isPermutationMatrixLayout(ll) &&
-         "Layout does not satisfy LinearEncodingAttr constraints. "
-         "If this encoding type can produce such layouts, add it to "
-         "sourceRequiresGenericEncoding().");
   return LinearEncodingAttr::get(ctx, std::move(ll));
 }
 
