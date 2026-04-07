@@ -37,6 +37,7 @@ using namespace mlir::triton::gpu;
 static SmallVector<unsigned>
 basesPerDimImpl(const LinearLayout::BasesT &namedBases, StringAttr dimName,
                 size_t rank, bool skipBroadcast = true);
+static bool hasSwizzledBases(const LinearLayout &ll, StringAttr dimName);
 
 // Utility
 namespace mlir {
@@ -82,10 +83,37 @@ bool isPermutationMatrixLayout(const LinearLayout &ll) {
   return withoutBroadcast.isInvertible();
 }
 
-Attribute makeEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll) {
-  if (isPermutationMatrixLayout(ll))
-    return LinearEncodingAttr::get(ctx, std::move(ll));
-  return GenericLinearEncodingAttr::get(ctx, std::move(ll));
+bool sourceRequiresGenericEncoding(Attribute srcEnc) {
+  if (isa<GenericLinearEncodingAttr>(srcEnc))
+    return true;
+
+  // Unwrap wrapper encodings to find the root layout.
+  if (auto dotOp = dyn_cast<DotOperandEncodingAttr>(srcEnc))
+    return sourceRequiresGenericEncoding(dotOp.getParent());
+  if (auto slice = dyn_cast<SliceEncodingAttr>(srcEnc))
+    return sourceRequiresGenericEncoding(slice.getParent());
+
+  if (auto wmma = dyn_cast<AMDWmmaEncodingAttr>(srcEnc)) {
+    auto kWarp = StringAttr::get(srcEnc.getContext(), "warp");
+    return wmma.getCtaLayout().hasInDim(kWarp) &&
+           hasSwizzledBases(wmma.getCtaLayout(), kWarp);
+  }
+
+  return false;
+}
+
+Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
+                                        Attribute srcEnc) {
+  if (sourceRequiresGenericEncoding(srcEnc)) {
+    assert(!isPermutationMatrixLayout(ll) &&
+           "Expected non-permutation layout from this source encoding");
+    return GenericLinearEncodingAttr::get(ctx, std::move(ll));
+  }
+  assert(isPermutationMatrixLayout(ll) &&
+         "Layout does not satisfy LinearEncodingAttr constraints. "
+         "If this encoding type can produce such layouts, add it to "
+         "sourceRequiresGenericEncoding().");
+  return LinearEncodingAttr::get(ctx, std::move(ll));
 }
 
 static GenericLinearEncodingAttr
@@ -2958,8 +2986,8 @@ struct TritonGPUInferLayoutInterface
       return failure();
     auto transposedLl = transposeLinearLayout(ll, order);
     if (isa<DistributedEncodingTrait>(operandEncoding)) {
-      resultEncoding =
-          makeEncodingFromLinearLayout(ctx, std::move(transposedLl));
+      resultEncoding = inferEncodingFromLinearLayout(
+          ctx, std::move(transposedLl), operandEncoding);
     } else if (padded) {
       resultEncoding = PaddedSharedEncodingAttr::get(ctx, padded.getIntervals(),
                                                      padded.getPaddings(),
@@ -3401,7 +3429,8 @@ struct TritonGPUInferLayoutInterface
     LinearLayout ll =
         inferReshapeLinearLayout(cast<TensorOrMemDesc>(srcTy), dstShape);
 
-    dstEnc = makeEncodingFromLinearLayout(srcEnc.getContext(), std::move(ll));
+    dstEnc = inferEncodingFromLinearLayout(srcEnc.getContext(), std::move(ll),
+                                           srcEnc);
     return success();
   }
 
@@ -3466,7 +3495,7 @@ struct TritonGPUInferLayoutInterface
         tryJoinOnAxis(ctx, ll, newLl, /*fwdInference=*/true, axis, loc);
 
     assert(result.succeeded());
-    dstEnc = makeEncodingFromLinearLayout(ctx, std::move(newLl));
+    dstEnc = inferEncodingFromLinearLayout(ctx, std::move(newLl), srcEnc);
     return success();
   }
 
@@ -3521,7 +3550,7 @@ struct TritonGPUInferLayoutInterface
     SmallVector<int64_t> dstShape(shape.begin(), shape.end());
     dstShape.pop_back();
     newLl = newLl.reshapeOuts(standardOutDimPairs(ctx, dstShape));
-    dstEnc = makeEncodingFromLinearLayout(ctx, std::move(newLl));
+    dstEnc = inferEncodingFromLinearLayout(ctx, std::move(newLl), srcEnc);
     return success();
   }
 
@@ -3584,7 +3613,7 @@ struct TritonGPUInferLayoutInterface
     auto result = tryJoinOnAxis(ctx, ll, newLl, fwdInference, axis, loc);
     if (!result.succeeded())
       return result;
-    outEnc = makeEncodingFromLinearLayout(ctx, std::move(newLl));
+    outEnc = inferEncodingFromLinearLayout(ctx, std::move(newLl), inEnc);
     return success();
   }
 };
@@ -3643,6 +3672,20 @@ struct TritonGPUVerifyTensorLayoutInterface
     return success();
   }
 
+  // Ops that have been explicitly vetted to handle encodings with swizzled
+  // warp bases or non-injective layouts (GenericLinearEncodingAttr,
+  // AMDWmmaEncoding with swizzled warps, etc.).  All other ops reject them so
+  // that unvetted code paths fail early rather than silently producing wrong
+  // results.
+  static bool isOpVettedForGenericEncoding(Operation *op) {
+    if (op->hasTrait<OpTrait::Elementwise>())
+      return true;
+    if (isView(op))
+      return true;
+    return isa<triton::SplatOp, triton::BroadcastOp,
+               triton::gpu::ConvertLayoutOp>(op);
+  }
+
   LogicalResult verifyTensorLayout(
       Attribute layout, RankedTensorType rankedTy, Operation *op,
       function_ref<InFlightDiagnostic()> makeErr) const override {
@@ -3654,6 +3697,13 @@ struct TritonGPUVerifyTensorLayoutInterface
     if (!distr)
       return makeErr()
              << "Non-distributed layout is not allowed in tensor type.";
+
+    if (sourceRequiresGenericEncoding(layout) &&
+        !isOpVettedForGenericEncoding(op)) {
+      return makeErr() << "Encoding not compatible with LinearEncodingAttr "
+                       << "(e.g., swizzled warp bases or non-injective layout) "
+                       << "is not supported on " << op->getName() << ".";
+    }
     if (llvm::any_of(rankedTy.getShape(),
                      [](int64_t i) { return !llvm::isPowerOf2_64(i); })) {
       return makeErr() << "Layout has shape " << rankedTy.getShape()

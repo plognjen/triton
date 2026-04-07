@@ -129,11 +129,6 @@ LogicalResult lowerLocalStore(Location loc, MLIRContext *ctx, Value regVal,
   auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
 
   auto regLayout = toLinearLayout(regTy);
-  if (!isPermutationMatrixLayout(regLayout))
-    return rewriter.notifyMatchFailure(
-        loc, "LocalStoreOp requires a layout compatible with "
-             "LinearEncodingAttr");
-
   auto sharedLayout = isPaddedEncoding(memDescTy.getEncoding())
                           ? paddedLinearLayout(memDescTy)
                           : toLinearLayout(memDescTy);
@@ -266,10 +261,6 @@ public:
                                                          llvmElemTy, rewriter);
 
     auto regLayout = toLinearLayout(regTy);
-    if (!isPermutationMatrixLayout(regLayout))
-      return op.emitError(
-          "LocalLoadOp requires a layout compatible with LinearEncodingAttr");
-
     auto sharedLayout = isPaddedEncoding(memDescTy.getEncoding())
                             ? paddedLinearLayout(memDescTy)
                             : toLinearLayout(memDescTy);

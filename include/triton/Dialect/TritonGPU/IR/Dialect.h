@@ -105,9 +105,18 @@ struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
 // permutation matrix (each non-broadcast basis maps to a distinct power-of-2).
 bool isPermutationMatrixLayout(const LinearLayout &ll);
 
-// Create LinearEncodingAttr if the layout is compatible, otherwise
-// GenericLinearEncodingAttr.
-Attribute makeEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll);
+// Decide whether transforming srcEnc (via transpose, reshape, join, split,
+// etc.) should produce a GenericLinearEncodingAttr.  The decision is based on
+// the *source encoding type* so that every origin of GenericLinearEncodingAttr
+// is explicit and traceable.
+bool sourceRequiresGenericEncoding(Attribute srcEnc);
+
+// Create LinearEncodingAttr or GenericLinearEncodingAttr from a transformed
+// linear layout, based on the source encoding type rather than properties of
+// the resulting layout.  Asserts verify that the choice is consistent with the
+// layout's actual properties.
+Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
+                                        Attribute srcEnc);
 
 // Convert a distributed layout to a linear encoding
 LinearEncodingAttr toLinearEncoding(RankedTensorType type);

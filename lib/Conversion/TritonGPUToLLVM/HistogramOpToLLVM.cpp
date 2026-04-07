@@ -2,9 +2,6 @@
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
-#include "triton/Dialect/TritonGPU/IR/Attributes.h"
-#include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -82,11 +79,6 @@ public:
   LogicalResult
   matchAndRewrite(triton::HistogramOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto srcLayout = toLinearLayout(op.getSrc().getType());
-    if (!isPermutationMatrixLayout(srcLayout))
-      return op.emitError(
-          "HistogramOp requires a layout compatible with LinearEncodingAttr");
-
     Location loc = op.getLoc();
     Value input = adaptor.getSrc();
     auto typeConverter = getTypeConverter();
