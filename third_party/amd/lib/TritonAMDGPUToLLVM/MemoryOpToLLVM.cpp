@@ -336,7 +336,6 @@ public:
   matchAndRewrite(triton::amdgpu::LocalLoadPackedTransposedOp op,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    MemDescType srcTy = op.getSrc().getType();
     RankedTensorType dstTy = op.getType();
     auto typeConverter = this->getTypeConverter();
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
@@ -363,11 +362,7 @@ private:
     auto ctx = rewriter.getContext();
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    auto kReg = str_attr("register");
-    auto kLane = str_attr("lane");
-    auto kWarp = str_attr("warp");
     auto kBlock = str_attr("block");
-    auto kOffset = str_attr("offset");
     auto dstTy = cast<RankedTensorType>(op.getType());
     auto srcTy = cast<MemDescType>(op.getSrc().getType());
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
@@ -397,7 +392,6 @@ private:
       return failure();
     }
 
-    auto smemPtrTy = ptr_ty(ctx, 3);
     auto paddedEnc =
         dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding());
     LinearLayout cvt = LinearLayout::empty();
