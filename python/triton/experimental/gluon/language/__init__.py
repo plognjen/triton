@@ -99,6 +99,8 @@ from ._layouts import (
     PaddedSharedLayout,
     SharedLinearLayout,
     CoalescedLayout,
+    GemmLayouts,
+    make_partitioned_gemm_layouts,
 )
 from ._math import (
     umulhi,

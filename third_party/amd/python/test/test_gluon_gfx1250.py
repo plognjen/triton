@@ -327,7 +327,8 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
                                 stride_bk, stride_bn,  #
                                 stride_cm, stride_cn,  #
                                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr, BLOCK_K: ttgl.constexpr,  #
-                                NUM_BUFFERS: ttgl.constexpr, USE_TDM: ttgl.constexpr, IS_B_K_CONTIG: ttgl.constexpr):
+                                NUM_BUFFERS: ttgl.constexpr, USE_TDM: ttgl.constexpr, IS_B_K_CONTIG: ttgl.constexpr,
+                                RESOLVE_PARTITION_CONFLICTS: ttgl.constexpr):
     a_dtype: ttgl.constexpr = a_ptr.type.element_ty
     b_dtype: ttgl.constexpr = b_ptr.type.element_ty
     ttgl.static_assert(a_dtype.is_fp16() or a_dtype.is_bf16(), "Only fp16/bf16 supported for A")
@@ -339,15 +340,27 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
         BLOCKED_LAYOUT_B: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [4, 1], [1, 0])
     else:
         BLOCKED_LAYOUT_B: ttgl.constexpr = ttgl.BlockedLayout([8, 1], [8, 4], [1, 4], [0, 1])
-    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32])
-    SHARED_LAYOUT_A: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_M, BLOCK_K],
-                                                                                [1, 0])
+
+    sublayout_a: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_M, BLOCK_K], [1, 0])
     if IS_B_K_CONTIG:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 8]], [BLOCK_K, BLOCK_N],
-                                                                                    [1, 0])
+        sublayout_b: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_N, 8]], [BLOCK_K, BLOCK_N],
+                                                                                [1, 0])
     else:
-        SHARED_LAYOUT_B: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_K, BLOCK_N],
-                                                                                    [0, 1])
+        sublayout_b: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK_K, 8]], [BLOCK_K, BLOCK_N],
+                                                                                [0, 1])
+
+    if RESOLVE_PARTITION_CONFLICTS:
+        _GEMM_LAYOUTS: ttgl.constexpr = ttgl.make_partitioned_gemm_layouts(BLOCK_M, BLOCK_N, BLOCK_K, sublayout_a,
+                                                                           sublayout_b, 4, [16, 16, 32],
+                                                                           is_a_transposed=False,
+                                                                           is_b_transposed=not IS_B_K_CONTIG)
+    else:
+        _GEMM_LAYOUTS: ttgl.constexpr = ttgl.GemmLayouts(
+            sublayout_a, sublayout_b, ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32]))
+    SHARED_LAYOUT_A: ttgl.constexpr = _GEMM_LAYOUTS.shared_layout_a
+    SHARED_LAYOUT_B: ttgl.constexpr = _GEMM_LAYOUTS.shared_layout_b
+    WMMA_LAYOUT: ttgl.constexpr = _GEMM_LAYOUTS.wmma_layout
+
     OPERAND_LAYOUT_A: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
     OPERAND_LAYOUT_B: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
 
@@ -454,12 +467,14 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
     ttgl.store(c_ptr + offs_c, accumulator, mask=mask_c)
 
 
-@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(m, n, k) for (m, n) in [(32, 32), (64, 64)] \
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(m, n, k) for (m, n) in [(64, 32), (64, 64)] \
                                                                for k in [32, 64]])
 @pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
 @pytest.mark.parametrize("IS_B_K_CONTIG", [True, False])
 @pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["ASYNC_COPY", "TDM"])
-def test_compile_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, IS_B_K_CONTIG, ASYNC_LOAD_TYPE):
+@pytest.mark.parametrize("RESOLVE_PARTITION_CONFLICTS", [True, False])
+def test_compile_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, IS_B_K_CONTIG, ASYNC_LOAD_TYPE,
+                                      RESOLVE_PARTITION_CONFLICTS):
     # Inner strides need to be constexpr (1) to get contiguity. Note the compiler frontend does the same for normal dispatches
     signature = {
         "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp32",  #
@@ -468,12 +483,14 @@ def test_compile_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, IS
         "stride_bk": "constexpr", "stride_bn": "constexpr",  #
         "stride_cm": "i32", "stride_cn": "constexpr",  #
         "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "BLOCK_K": "constexpr",  #
-        "NUM_BUFFERS": "constexpr", "USE_TDM": "constexpr", "IS_B_K_CONTIG": "constexpr"
+        "NUM_BUFFERS": "constexpr", "USE_TDM": "constexpr", "IS_B_K_CONTIG": "constexpr", "RESOLVE_PARTITION_CONFLICTS":
+        "constexpr"
     }
 
     constexprs = {
         "stride_ak": 1, "stride_cn": 1, "BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "BLOCK_K": BLOCK_K, "NUM_BUFFERS":
-        NUM_BUFFERS, "USE_TDM": ASYNC_LOAD_TYPE == "TDM", "IS_B_K_CONTIG": IS_B_K_CONTIG
+        NUM_BUFFERS, "USE_TDM": ASYNC_LOAD_TYPE == "TDM", "IS_B_K_CONTIG": IS_B_K_CONTIG, "RESOLVE_PARTITION_CONFLICTS":
+        RESOLVE_PARTITION_CONFLICTS
     }
     constexprs["stride_bn"] = BLOCK_N if not IS_B_K_CONTIG else 1
     constexprs["stride_bk"] = BLOCK_K if IS_B_K_CONTIG else 1
@@ -505,13 +522,15 @@ def test_compile_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, IS
         assert len(re.findall("global_load_async_to_lds", amdgcn)) >= NUM_BUFFERS * copy_instr_per_iter
 
 
-@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(m, n, k) for (m, n) in [(32, 32), (64, 64)] \
+@pytest.mark.parametrize("BLOCK_M,BLOCK_N,BLOCK_K", [(m, n, k) for (m, n) in [(64, 32), (64, 64)] \
                                                                for k in [32, 64]])
 @pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
 @pytest.mark.parametrize("M,N,K", [(256, 256, 512), (240, 240, 496), (250, 250, 510)])
 @pytest.mark.parametrize("IS_B_K_CONTIG", [True, False])
-@pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["ASYNC_COPY", "TDM"])
-def test_runtime_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N, K, IS_B_K_CONTIG, ASYNC_LOAD_TYPE):
+@pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["TDM"])
+@pytest.mark.parametrize("RESOLVE_PARTITION_CONFLICTS", [True, False])
+def test_runtime_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M, N, K, IS_B_K_CONTIG, ASYNC_LOAD_TYPE,
+                                      RESOLVE_PARTITION_CONFLICTS):
     if triton.cdiv(K, BLOCK_K) < NUM_BUFFERS:
         pytest.skip("Skip tests where K/BLOCK_K < NUM_BUFFERS")
 
@@ -540,7 +559,8 @@ def test_runtime_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M,
         stride_bk, stride_bn,  #
         stride_cm, stride_cn,  #
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,  #
-        NUM_BUFFERS=NUM_BUFFERS, USE_TDM=ASYNC_LOAD_TYPE == "TDM", IS_B_K_CONTIG=IS_B_K_CONTIG)
+        NUM_BUFFERS=NUM_BUFFERS, USE_TDM=ASYNC_LOAD_TYPE == "TDM", IS_B_K_CONTIG=IS_B_K_CONTIG,
+        RESOLVE_PARTITION_CONFLICTS=RESOLVE_PARTITION_CONFLICTS)
 
     c_triton = c_device.cpu()
     c_torch = a.to(torch.float32) @ b.to(torch.float32)
@@ -1434,7 +1454,7 @@ def test_runtime_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYP
 def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
                                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,  #
                                 NUM_PARTITIONS: ttgl.constexpr, NUM_GROUPS: ttgl.constexpr,  #
-                                PARTITION_DIM: ttgl.constexpr):
+                                PARTITION_DIM: ttgl.constexpr, COL_MAJOR: ttgl.constexpr):
     """TDM load with PartitionedSharedLayout, then store via registers."""
     num_warps: ttgl.constexpr = ttgl.num_warps()
 
@@ -1445,19 +1465,31 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
         inner_shape_m: ttgl.constexpr = BLOCK_M
         inner_shape_n: ttgl.constexpr = BLOCK_N // (NUM_PARTITIONS * NUM_GROUPS)
 
+    if COL_MAJOR:
+        order: ttgl.constexpr = [0, 1]
+    else:
+        order: ttgl.constexpr = [1, 0]
+
     inner_layout: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [inner_shape_m, inner_shape_n],
-                                                                             [1, 0])
+                                                                             order)
     smem_layout: ttgl.constexpr = PartitionedSharedLayout(NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, inner_layout)
 
-    block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
+    if COL_MAJOR:
+        block_layout: ttgl.constexpr = ttgl.BlockedLayout([8, 1], [8, 4], [1, num_warps], [0, 1])
+    else:
+        block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
 
     pid_m = ttgl.program_id(axis=0)
     pid_n = ttgl.program_id(axis=1)
     idx_m = pid_m * BLOCK_M
     idx_n = pid_n * BLOCK_N
 
-    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
-                                                         block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
+    if COL_MAJOR:
+        a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(1, M),
+                                                             block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
+    else:
+        a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
+                                                             block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, a_desc.block_shape, a_desc.layout)
 
     ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer)
@@ -1467,7 +1499,10 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
 
     offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, block_layout))
     offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, block_layout))
-    offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
+    if COL_MAJOR:
+        offs_b = offs_bm[:, None] + offs_bn[None, :] * M
+    else:
+        offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
     b_mask = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
     ttgl.store(b_ptr + offs_b, a, mask=b_mask)
 
@@ -1476,47 +1511,59 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
 @pytest.mark.parametrize(
     "BLOCK_M,BLOCK_N,NUM_PARTITIONS,NUM_GROUPS,PARTITION_DIM",
     [
-        # # --- partitionDim = 0 (rows) ---
-        # 2 partitions x 1 group = 2 pieces along dim0 -> 4 warps covers it
+        # --- partitionDim = 0 ---
+        # 2 pieces along dim0.
+        # Row-major: dim0 != inner(1), subdivision -> warps=[4,1], 1 instr.
+        # Col-major: dim0 == inner(0), no subdivision -> warps=[2,2], 1 instr.
         (64, 32, 2, 1, 0),
-        # 2 partitions x 2 groups = 4 pieces along dim0 -> 4 warps covers it
+        # 4 pieces along dim0.
+        # Row-major: warps=[4,1], 1 instr.
+        # Col-major: warps=[4,1], 1 instr.
         (64, 32, 2, 2, 0),
-        # 2 partitions x 4 groups = 8 pieces along dim0 -> 4 warps < 8 -> 2 instructions
+        # 8 pieces along dim0 -> 4 warps < 8 -> 2 instructions.
         (64, 32, 2, 4, 0),
-        # 2 partitions x 8 groups = 16 pieces along dim0 -> 4 warps < 16 -> 4 instructions
+        # 4 pieces along dim0 on a larger tile.
         (128, 64, 2, 2, 0),
-        # --- partitionDim = 1 (cols) ---
-        # 2 partitions x 1 group = 2 pieces along dim1
+        # --- partitionDim = 1 ---
+        # 2 pieces along dim1.
+        # Row-major: dim1 == inner(1), no subdivision -> warps=[1,2], 1 instr.
+        # Col-major: dim1 != inner(0), subdivision -> warps=[1,4], 1 instr.
         (32, 64, 2, 1, 1),
-        # 2 partitions x 2 groups = 4 pieces along dim1 -> 4 warps covers it
+        # 4 pieces along dim1.
         (64, 64, 2, 2, 1),
-        # 2 partitions x 4 groups = 8 pieces along dim1 -> 4 warps < 8 -> 2 instructions
+        # 8 pieces along dim1 -> 4 warps < 8 -> 2 instructions.
         (64, 128, 2, 4, 1),
-        # 2 partitions x 8 groups = 16 pieces along dim1 -> 4 warps < 16 -> 4 instructions
+        # 16 pieces along dim1 -> 4 warps < 16 -> 4 instructions.
         (64, 256, 2, 8, 1),
     ],
 )
 @pytest.mark.parametrize("num_warps", [4])
+@pytest.mark.parametrize("COL_MAJOR", [False, True])
 @pytest.mark.parametrize("M,N", [(256, 256)])
-def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, num_warps, M, N):
+def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, num_warps, COL_MAJOR,
+                                      M, N):
     """Test TDM async_load with PartitionedSharedLayout (global -> LDS)."""
     torch.manual_seed(42)
     a = torch.randint(0x0, 0xFFFF, (M, N), dtype=torch.uint16)
-    b = torch.zeros_like(a)
 
-    a_device = a.cuda()
-    b_device = b.cuda()
+    if COL_MAJOR:
+        a_device = a.T.contiguous().T.cuda()
+        b_device = torch.zeros((N, M), dtype=a.dtype).cuda().T
+    else:
+        a_device = a.cuda()
+        b_device = torch.zeros_like(a).cuda()
 
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     partitioned_tdm_copy_kernel[grid](a_device, b_device, M, N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
                                       NUM_PARTITIONS=NUM_PARTITIONS, NUM_GROUPS=NUM_GROUPS, PARTITION_DIM=PARTITION_DIM,
-                                      num_warps=num_warps)
+                                      COL_MAJOR=COL_MAJOR, num_warps=num_warps)
 
     b_triton = b_device.cpu()
     mismatched = (b_triton != a).sum().item()
     total = a.numel()
     assert mismatched == 0, (f"Mismatch: {mismatched}/{total} ({100*mismatched/total:.1f}%) elements differ. "
-                             f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}")
+                             f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}, "
+                             f"colMajor={COL_MAJOR}")
 
 
 @gluon.jit

@@ -703,3 +703,116 @@ def warps_per_cta(layout, shape):
         return warps_per_cta(layout.parent, shape)
     else:
         return layout.warps_per_cta
+
+
+@constexpr_function
+def _make_partitioned_inner_layout(sublayout, partition_dim, num_partitions, num_groups, order):
+    """Derive the inner PaddedSharedLayout for a single logical piece.
+
+    Takes a full-tensor sublayout and produces the layout for one piece
+    (``partition_dim`` is divided by ``num_partitions * num_groups``).
+    The ``*`` operator in LinearLayout left-shifts outer bases by the
+    inner output-dim size, so ``baseLayout * partLayout * extension``
+    reconstructs the full tensor dimension only when baseLayout covers
+    exactly one piece.
+    """
+    num_logical_pieces = num_partitions * num_groups
+    inner_shape = list(sublayout.shape)
+    assert inner_shape[partition_dim] % num_logical_pieces == 0
+    inner_shape[partition_dim] //= num_logical_pieces
+
+    # TODO: when the partitioned dimension is the contiguous (fastest-varying)
+    # dimension, the interval_padding_pairs may need adjustment to preserve
+    # bank-conflict avoidance properties for the smaller piece shape.
+    return PaddedSharedLayout.with_identity_for(sublayout.interval_padding_pairs, inner_shape, order,
+                                                sublayout.cga_layout)
+
+
+@dataclass(frozen=True)
+class GemmLayouts:
+    shared_layout_a: object
+    shared_layout_b: object
+    wmma_layout: object
+
+
+@constexpr_function
+def make_partitioned_gemm_layouts(block_m, block_n, block_k, sublayout_a, sublayout_b, num_warps, instr_shape,
+                                  is_a_transposed=False, is_b_transposed=False):
+    """Create partitioned shared memory layouts and WMMA layout for a GFX1250 GEMM.
+
+    Transforms non-partitioned ``PaddedSharedLayout``s into
+    ``PartitionedSharedLayout``s that reduce LDS partition conflicts on
+    GFX1250, paired with an ``AMDWMMALayout`` whose warp distribution is
+    aligned to the partition boundaries.
+
+    Args:
+        block_m: M dimension tile size (must be >= 64).
+        block_n: N dimension tile size (must be >= 32).
+        block_k: K dimension tile size.
+        sublayout_a: ``PaddedSharedLayout`` for operand A (shape ``[block_m, block_k]``).
+        sublayout_b: ``PaddedSharedLayout`` for operand B (shape ``[block_k, block_n]``).
+        num_warps: Number of warps per CTA.  Currently must be 4 or 8.
+        instr_shape: WMMA instruction shape as ``[M, N, K]``.
+        is_a_transposed: Whether A is transposed, i.e. M is contiguous in
+            shared memory (order ``[0, 1]``) instead of K (order ``[1, 0]``).
+        is_b_transposed: Whether B is transposed, i.e. K is contiguous in
+            shared memory (order ``[0, 1]``) instead of N (order ``[1, 0]``).
+
+    Returns:
+        A ``GemmLayouts`` with fields ``shared_layout_a``, ``shared_layout_b``,
+        and ``wmma_layout``.
+    """
+    from triton.experimental.gluon.language.amd._layouts import AMDWMMALayout
+    from triton.experimental.gluon.language.amd.gfx1250._layouts import PartitionedSharedLayout
+
+    INSTR_SHAPE = list(instr_shape)
+
+    assert num_warps in (4, 8), f"Only 4 or 8 warps are currently supported, got {num_warps}"
+
+    NUM_PARTITIONS = 2
+
+    # A shape [M, K]: not transposed → K contiguous [1, 0]; transposed → M contiguous [0, 1]
+    # B shape [K, N]: not transposed → N contiguous [1, 0]; transposed → K contiguous [0, 1]
+    order_a = [0, 1] if is_a_transposed else [1, 0]
+    order_b = [0, 1] if is_b_transposed else [1, 0]
+
+    # Swizzled warp + register bases for 2-partition alignment.
+    # See AMDWmmaEncodingAttr docs in TritonGPUAttrDefs.td for derivation.
+    if num_warps == 4:
+        warp_bases = [[2, 1], [1, 0]]
+        reg_bases = [[2, 0]]
+    else:  # num_warps == 8
+        warp_bases = [[2, 1], [1, 0], [2, 0]]
+        reg_bases = []
+
+    WARP_TILES_M = 4
+    WARP_TILES_N = 2
+
+    wmma_layout = AMDWMMALayout(3, True, warp_bases, reg_bases, INSTR_SHAPE)
+
+    warp_coverage_m = WARP_TILES_M * INSTR_SHAPE[0]  # 64 elements
+    warp_coverage_n = WARP_TILES_N * INSTR_SHAPE[1]  # 32 or 64 elements
+
+    is_power_of_2 = lambda n: n > 0 and n & (n - 1) == 0
+
+    # --- A: partition along M (dim 0), shape [block_m, block_k] ---
+    num_groups_a = block_m // warp_coverage_m
+    assert num_groups_a >= 1, f"block_m ({block_m}) must be >= {warp_coverage_m}"
+    assert is_power_of_2(num_groups_a), \
+        f"block_m // {warp_coverage_m} = {num_groups_a} must be a power of 2"
+    a_partition_dim = 0  #if not is_a_transposed else 1
+    b_partition_dim = 1  #if not is_b_transposed else 0
+    inner_a = _make_partitioned_inner_layout(sublayout_a, partition_dim=a_partition_dim, num_partitions=NUM_PARTITIONS,
+                                             num_groups=num_groups_a, order=order_a)
+    shared_layout_a = PartitionedSharedLayout(NUM_PARTITIONS, num_groups_a, a_partition_dim, inner_a)
+
+    # --- B: partition along N (dim 1 in [block_k, block_n]) ---
+    num_groups_b = block_n // warp_coverage_n
+    assert num_groups_b >= 1, f"block_n ({block_n}) must be >= {warp_coverage_n}"
+    assert is_power_of_2(num_groups_b), \
+        f"block_n // {warp_coverage_n} = {num_groups_b} must be a power of 2"
+    inner_b = _make_partitioned_inner_layout(sublayout_b, partition_dim=b_partition_dim, num_partitions=NUM_PARTITIONS,
+                                             num_groups=num_groups_b, order=order_b)
+    shared_layout_b = PartitionedSharedLayout(NUM_PARTITIONS, num_groups_b, b_partition_dim, inner_b)
+
+    return GemmLayouts(shared_layout_a, shared_layout_b, wmma_layout)
