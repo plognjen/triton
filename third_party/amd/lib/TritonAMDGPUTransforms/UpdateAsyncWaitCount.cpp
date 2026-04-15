@@ -447,16 +447,20 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
         if (auto copyOp = dyn_cast<AsyncTDMCopyGlobalToLocalOp>(op)) {
           auto smemTy = copyOp.getResult().getType();
           int numWarps = ttg::lookupNumWarps(op);
+          // numInstr depends only on numLogicalPieces and numWarps, not on
+          // the coordinate space, so isRowMajor=true is fine here.
           auto [_, numInstr] =
               mlir::LLVM::AMD::distributeTDMWarpsAlignToPartition(
-                  smemTy.getShape(), numWarps, smemTy.getEncoding());
+                  smemTy.getShape(), numWarps, smemTy.getEncoding(),
+                  /*isRowMajor=*/true);
           return numInstr;
         } else if (auto copyOp = dyn_cast<AsyncTDMCopyLocalToGlobalOp>(op)) {
           auto smemTy = copyOp.getSrc().getType();
           int numWarps = ttg::lookupNumWarps(op);
           auto [_, numInstr] =
               mlir::LLVM::AMD::distributeTDMWarpsAlignToPartition(
-                  smemTy.getShape(), numWarps, smemTy.getEncoding());
+                  smemTy.getShape(), numWarps, smemTy.getEncoding(),
+                  /*isRowMajor=*/true);
           return numInstr;
         } else if (isa<AsyncTDMScatterOp, AsyncTDMGatherOp>(op)) {
           // For scatter and gather we need to get the count of TDM intrinsics

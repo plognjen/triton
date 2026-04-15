@@ -1434,7 +1434,7 @@ def test_runtime_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYP
 def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
                                 BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,  #
                                 NUM_PARTITIONS: ttgl.constexpr, NUM_GROUPS: ttgl.constexpr,  #
-                                PARTITION_DIM: ttgl.constexpr):
+                                PARTITION_DIM: ttgl.constexpr, COL_MAJOR: ttgl.constexpr):
     """TDM load with PartitionedSharedLayout, then store via registers."""
     num_warps: ttgl.constexpr = ttgl.num_warps()
 
@@ -1445,19 +1445,31 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
         inner_shape_m: ttgl.constexpr = BLOCK_M
         inner_shape_n: ttgl.constexpr = BLOCK_N // (NUM_PARTITIONS * NUM_GROUPS)
 
+    if COL_MAJOR:
+        order: ttgl.constexpr = [0, 1]
+    else:
+        order: ttgl.constexpr = [1, 0]
+
     inner_layout: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [inner_shape_m, inner_shape_n],
-                                                                             [1, 0])
+                                                                             order)
     smem_layout: ttgl.constexpr = PartitionedSharedLayout(NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, inner_layout)
 
-    block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
+    if COL_MAJOR:
+        block_layout: ttgl.constexpr = ttgl.BlockedLayout([8, 1], [8, 4], [1, num_warps], [0, 1])
+    else:
+        block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
 
     pid_m = ttgl.program_id(axis=0)
     pid_n = ttgl.program_id(axis=1)
     idx_m = pid_m * BLOCK_M
     idx_n = pid_n * BLOCK_N
 
-    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
-                                                         block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
+    if COL_MAJOR:
+        a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(1, M),
+                                                             block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
+    else:
+        a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
+                                                             block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, a_desc.block_shape, a_desc.layout)
 
     ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer)
@@ -1467,7 +1479,10 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
 
     offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, block_layout))
     offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, block_layout))
-    offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
+    if COL_MAJOR:
+        offs_b = offs_bm[:, None] + offs_bn[None, :] * M
+    else:
+        offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
     b_mask = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
     ttgl.store(b_ptr + offs_b, a, mask=b_mask)
 
@@ -1478,6 +1493,8 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
     [
         # # --- partitionDim = 0 (rows) ---
         # 2 partitions x 1 group = 2 pieces along dim0 -> 4 warps covers it
+        # Row-major: dim0 != inner(1), subdivision -> warps=[4,1], 1 instr.
+        # Col-major: dim0 == inner(0), no subdivision -> warps=[2,2], 1 instr.
         (64, 32, 2, 1, 0),
         # 2 partitions x 2 groups = 4 pieces along dim0 -> 4 warps covers it
         (64, 32, 2, 2, 0),
@@ -1486,7 +1503,9 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
         # 2 partitions x 8 groups = 16 pieces along dim0 -> 4 warps < 16 -> 4 instructions
         (128, 64, 2, 2, 0),
         # --- partitionDim = 1 (cols) ---
-        # 2 partitions x 1 group = 2 pieces along dim1
+        # 2 partitions x 1 group = 2 pieces along dim1 -> 4 warps covers it
+        # Row-major: dim1 == inner(1), no subdivision -> warps=[2,2], 1 instr.
+        # Col-major: dim1 != inner(0), subdivision -> warps=[1,4], 1 instr.
         (32, 64, 2, 1, 1),
         # 2 partitions x 2 groups = 4 pieces along dim1 -> 4 warps covers it
         (64, 64, 2, 2, 1),
@@ -1496,27 +1515,32 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
         (64, 256, 2, 8, 1),
     ],
 )
-@pytest.mark.parametrize("num_warps", [4])
-@pytest.mark.parametrize("M,N", [(256, 256)])
-def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, num_warps, M, N):
+@pytest.mark.parametrize("COL_MAJOR", [False, True])
+def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, COL_MAJOR):
     """Test TDM async_load with PartitionedSharedLayout (global -> LDS)."""
+    M, N = 256, 256
+    num_warps = 4
     torch.manual_seed(42)
     a = torch.randint(0x0, 0xFFFF, (M, N), dtype=torch.uint16)
-    b = torch.zeros_like(a)
 
-    a_device = a.cuda()
-    b_device = b.cuda()
+    if COL_MAJOR:
+        a_device = a.T.contiguous().T.cuda()
+        b_device = torch.zeros((N, M), dtype=a.dtype).cuda().T
+    else:
+        a_device = a.cuda()
+        b_device = torch.zeros_like(a).cuda()
 
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     partitioned_tdm_copy_kernel[grid](a_device, b_device, M, N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
                                       NUM_PARTITIONS=NUM_PARTITIONS, NUM_GROUPS=NUM_GROUPS, PARTITION_DIM=PARTITION_DIM,
-                                      num_warps=num_warps)
+                                      COL_MAJOR=COL_MAJOR, num_warps=num_warps)
 
     b_triton = b_device.cpu()
     mismatched = (b_triton != a).sum().item()
     total = a.numel()
     assert mismatched == 0, (f"Mismatch: {mismatched}/{total} ({100*mismatched/total:.1f}%) elements differ. "
-                             f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}")
+                             f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}, "
+                             f"colMajor={COL_MAJOR}")
 
 
 @gluon.jit

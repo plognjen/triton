@@ -12,6 +12,20 @@
 #include "../../backend/include/TDMCommon.h"
 
 namespace mlir::LLVM::AMD {
+
+// `PartitionedSharedEncodingAttr` stores `partitionDim` in logical tensor
+// order. TDM `blockShape` / `warpsPerCTA` use descriptor order: for col-major,
+// `swapTrailingDims`  exchanges the last two dims.
+// This function updates partition dim accordingly.
+static unsigned mapLogicalPartitionDimToDescriptor(unsigned logicalPartitionDim,
+                                                   unsigned numDims,
+                                                   bool isRowMajor) {
+  assert(logicalPartitionDim < numDims && "partitionDim out of range");
+  if (isRowMajor || logicalPartitionDim < numDims - 2)
+    return logicalPartitionDim;
+  return logicalPartitionDim == numDims - 2 ? numDims - 1 : numDims - 2;
+}
+
 namespace {
 
 // Helper to decode a value spanning two 32-bit words
@@ -52,11 +66,13 @@ SmallVector<unsigned> distributeTDMWarps(ArrayRef<int64_t> blockShape,
 // the linear stream won't align with the shared memory row structure.
 //
 // Returns: (warpsPerCTA, numTDMInstructions)
-std::pair<SmallVector<unsigned>, unsigned> distributeTDMWarpsAlignToPartition(
-    ArrayRef<int64_t> blockShape, int numWarps,
-    PartitionedSharedEncodingAttr partitionedEnc) {
+static std::pair<SmallVector<unsigned>, unsigned>
+distributeTDMWarpsAlignToPartition(ArrayRef<int64_t> blockShape, int numWarps,
+                                   PartitionedSharedEncodingAttr partitionedEnc,
+                                   bool isRowMajor) {
   unsigned numDims = blockShape.size();
-  unsigned partitionDim = partitionedEnc.getPartitionDim();
+  unsigned partitionDim = mapLogicalPartitionDimToDescriptor(
+      partitionedEnc.getPartitionDim(), numDims, isRowMajor);
   unsigned numLogicalPieces = partitionedEnc.getNumLogicalPieces();
   int64_t pieceSize =
       blockShape[partitionDim] / static_cast<int64_t>(numLogicalPieces);
@@ -107,10 +123,12 @@ std::pair<SmallVector<unsigned>, unsigned> distributeTDMWarpsAlignToPartition(
 
 std::pair<SmallVector<unsigned>, unsigned>
 distributeTDMWarpsAlignToPartition(ArrayRef<int64_t> blockShape, int numWarps,
-                                   Attribute encoding) {
+                                   Attribute encoding, bool isRowMajor) {
+  // blockShape must be in descriptor space (col-major: trailing two dims
+  // swapped). For partitioned encodings, map logical partitionDim accordingly.
   if (auto partitionedEnc = dyn_cast<PartitionedSharedEncodingAttr>(encoding))
     return distributeTDMWarpsAlignToPartition(blockShape, numWarps,
-                                              partitionedEnc);
+                                              partitionedEnc, isRowMajor);
   return {distributeTDMWarps(blockShape, numWarps), 1};
 }
 
@@ -265,13 +283,19 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
   // chunk stays within a single partition piece.  When multi-instr is needed,
   // the effective extent along partitionDim is the slice extent
   // (warps * pieceSize), not the full block extent.
+  // blockShape is already in descriptor space (swapped for col-major above).
   {
     auto [warpsPerCTA, numInstr] = distributeTDMWarpsAlignToPartition(
-        blockShape, numWarps, sharedEncoding);
+        blockShape, numWarps, sharedEncoding, isRowMajor);
     if (auto partitionedEnc =
             dyn_cast<PartitionedSharedEncodingAttr>(sharedEncoding);
-        partitionedEnc && numInstr > 1)
-      blockShape[partitionedEnc.getPartitionDim()] /= numInstr;
+        partitionedEnc && numInstr > 1) {
+      // partitionDim from the encoding is logical; match descriptor trailing
+      // swap (see mapLogicalPartitionDimToDescriptor).
+      unsigned pDim = mapLogicalPartitionDimToDescriptor(
+          partitionedEnc.getPartitionDim(), numDims, isRowMajor);
+      blockShape[pDim] /= numInstr;
+    }
 
     for (size_t i = 0; i < numDims; ++i) {
       blockShape[i] = llvm::divideCeil(blockShape[i], warpsPerCTA[i]);
@@ -1031,9 +1055,13 @@ void emitTDMLoadStore(RewriterBase &rewriter, Location loc,
 
   auto partitionedEnc = dyn_cast<PartitionedSharedEncodingAttr>(encoding);
 
-  // Compute warp distribution -- partition-aligned when needed.
-  auto [warpsPerCTA, numTDMInstructions] =
-      distributeTDMWarpsAlignToPartition(blockShape, numWarps, encoding);
+  // Compute warp distribution in descriptor space (swapped for col-major).
+  // warpsPerCTA indices correspond to descriptor-space dimensions.
+  SmallVector<int64_t> descBlockShape(blockShape.begin(), blockShape.end());
+  if (!isRowMajor)
+    swapTrailingDims(descBlockShape);
+  auto [warpsPerCTA, numTDMInstructions] = distributeTDMWarpsAlignToPartition(
+      descBlockShape, numWarps, encoding, isRowMajor);
 
   // Fast path: single instruction covers the entire block.
   if (numTDMInstructions == 1) {
@@ -1057,9 +1085,11 @@ void emitTDMLoadStore(RewriterBase &rewriter, Location loc,
   //   3. Build a LinearLayout for the slice (fewer groups)
   //   4. Emit one TDM intrinsic
   unsigned partitionDim = partitionedEnc.getPartitionDim();
+  unsigned descriptorPartitionDim =
+      mapLogicalPartitionDimToDescriptor(partitionDim, numDims, isRowMajor);
   unsigned numLogicalPieces = partitionedEnc.getNumLogicalPieces();
   int64_t pieceSize = blockShape[partitionDim] / numLogicalPieces;
-  unsigned warpsAlongPartition = warpsPerCTA[partitionDim];
+  unsigned warpsAlongPartition = warpsPerCTA[descriptorPartitionDim];
   int64_t sliceExtent = static_cast<int64_t>(warpsAlongPartition) * pieceSize;
 
   unsigned numPartitions = partitionedEnc.getNumPartitions();

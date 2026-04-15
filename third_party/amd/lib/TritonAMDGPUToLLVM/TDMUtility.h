@@ -102,7 +102,7 @@ void emitTDMLoadStore(RewriterBase &rewriter, Location loc,
 // distribution with numTDMInstructions = 1.
 std::pair<SmallVector<unsigned>, unsigned>
 distributeTDMWarpsAlignToPartition(ArrayRef<int64_t> blockShape, int numWarps,
-                                   Attribute encoding);
+                                   Attribute encoding, bool isRowMajor);
 
 // Calculate the number of TDM gather/scatter instructions needed.
 // - numIndices: number of row indices
