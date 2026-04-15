@@ -105,16 +105,12 @@ struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
 // permutation matrix (each non-broadcast basis maps to a distinct power-of-2).
 bool isPermutationMatrixLayout(const LinearLayout &ll);
 
-// Decide whether transforming srcEnc (via transpose, reshape, join, split,
-// etc.) should produce a GenericLinearEncodingAttr.  The decision is based on
-// the *source encoding type* so that every origin of GenericLinearEncodingAttr
-// is explicit and traceable.
-bool sourceRequiresGenericEncoding(Attribute srcEnc);
+// Returns whether the attribute is a GenericLinearEncoding, a WMMA with warp
+// swizzling or a slice or DotOp of one of these.
+bool isGenericEncoding(Attribute attr);
 
-// Create LinearEncodingAttr or GenericLinearEncodingAttr from a transformed
-// linear layout, based on the source encoding type rather than properties of
-// the resulting layout.  Asserts verify that the choice is consistent with the
-// layout's actual properties.
+// Create a GenericLinearEncoding if the source isGenericEncoding, and a
+// LinearEncoding otherwise.
 Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
                                         Attribute srcEnc);
 

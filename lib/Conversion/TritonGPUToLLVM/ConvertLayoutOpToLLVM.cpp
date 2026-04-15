@@ -43,8 +43,6 @@ struct ConvertLayoutOpConversion
     auto dstTy = op.getType();
 
     LinearLayout conversion = minimalCvtLayout(srcTy, dstTy);
-    LinearLayout srcLayout = toLinearLayout(srcTy);
-    LinearLayout dstLayout = toLinearLayout(dstTy);
 
     auto kBlock = str_attr("block");
     auto kWarp = str_attr("warp");
@@ -52,16 +50,18 @@ struct ConvertLayoutOpConversion
     auto kRegister = str_attr("register");
 
     auto dims = conversion.getInDimNames();
+    auto srcEnc = cast<RankedTensorType>(srcTy).getEncoding();
+    auto dstEnc = cast<RankedTensorType>(dstTy).getEncoding();
+    if ((isGenericEncoding(srcEnc) || isGenericEncoding(dstEnc)) &&
+        llvm::range_size(dims) > 1)
+      return op.emitError("ConvertLayoutOp  supports GenericLinearEncoding "
+                          " only when the conversion is transfer between "
+                          "values in the same thread.");
     bool alwaysUseWarpShuffle = cvtAlwaysUseWarpShuffle(op);
     assert(to_vector(conversion.getInDimNames()) ==
            to_vector(conversion.getOutDimNames()));
     if (llvm::is_contained(dims, kBlock) || llvm::is_contained(dims, kWarp)) {
       assert(!alwaysUseWarpShuffle);
-      if (!isPermutationMatrixLayout(srcLayout) ||
-          !isPermutationMatrixLayout(dstLayout))
-        return op.emitError(
-            "ConvertLayoutOp through shared memory requires layouts "
-            "compatible with LinearEncodingAttr");
       // Transfer between values in the same CTA, or across CTAs. We move values
       // through (distributed) shared memory.
       transferSwizzlingLocalMem(op, adaptor.getSrc(), rewriter);
@@ -73,11 +73,6 @@ struct ConvertLayoutOpConversion
       if (cvtNeedsWarpShuffle(srcTy, dstTy) || alwaysUseWarpShuffle)
         return transferWithinWarp(op, adaptor, rewriter);
 
-      if (!isPermutationMatrixLayout(srcLayout) ||
-          !isPermutationMatrixLayout(dstLayout))
-        return op.emitError(
-            "ConvertLayoutOp through shared memory requires layouts "
-            "compatible with LinearEncodingAttr");
       transferSwizzlingLocalMem(op, adaptor.getSrc(), rewriter);
       return success();
     } else if (llvm::is_contained(dims, kRegister)) {
