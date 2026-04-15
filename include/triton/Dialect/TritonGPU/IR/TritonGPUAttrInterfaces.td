@@ -118,11 +118,13 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     (ins), [{}], [{
       const auto &ll = $_attr.getLinearLayout();
       auto rank = ll.getNumOutDims();
-      SmallVector<unsigned> defaultOrd(rank);
-      for (unsigned i = 0; i < rank; ++i)
-        defaultOrd[i] = rank - 1 - i;
+      SmallVector<unsigned> order(rank);
+      // Choose [rank-1, rank-2, ... 0] as the default order in case
+      // there are dims that do not move in the register.
+      // This order is as good as any.
+      std::iota(order.rbegin(), order.rend(), 0);
       return $_attr.orderPerDim(
-          StringAttr::get($_attr.getContext(), "register"), defaultOrd);
+          StringAttr::get($_attr.getContext(), "register"), order);
     }]>,
     InterfaceMethod<"Get contiguity for a given input dimension.",
                     "SmallVector<unsigned>", "getContig",
@@ -182,6 +184,10 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
     InterfaceMethod<"Get the rep order (also satisfies DistributedEncodingTrait).",
                     "SmallVector<unsigned>", "getRepOrder",
                     (ins), [{}], [{
+      // This is not correct, but:
+      // - It happens to agree in most places with the legacy layout
+      // - getRepOrder does not make sense for LinearEncodingAttr as it already has
+      //   the same shape as the tensor that uses it
       return $_attr.getOrder();
     }]>,
     InterfaceMethod<"Get elements per thread (overrides DistributedEncodingTrait default).",

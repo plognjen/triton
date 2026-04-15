@@ -83,18 +83,18 @@ bool isPermutationMatrixLayout(const LinearLayout &ll) {
   return withoutBroadcast.isInvertible();
 }
 
-bool sourceRequiresGenericEncoding(Attribute srcEnc) {
-  if (isa<GenericLinearEncodingAttr>(srcEnc))
+bool isGenericEncoding(Attribute attr) {
+  if (isa<GenericLinearEncodingAttr>(attr))
     return true;
 
   // Unwrap wrapper encodings to find the root layout.
-  if (auto dotOp = dyn_cast<DotOperandEncodingAttr>(srcEnc))
-    return sourceRequiresGenericEncoding(dotOp.getParent());
-  if (auto slice = dyn_cast<SliceEncodingAttr>(srcEnc))
-    return sourceRequiresGenericEncoding(slice.getParent());
+  if (auto dotOp = dyn_cast<DotOperandEncodingAttr>(attr))
+    return isGenericEncoding(dotOp.getParent());
+  if (auto slice = dyn_cast<SliceEncodingAttr>(attr))
+    return isGenericEncoding(slice.getParent());
 
-  if (auto wmma = dyn_cast<AMDWmmaEncodingAttr>(srcEnc)) {
-    auto kWarp = StringAttr::get(srcEnc.getContext(), "warp");
+  if (auto wmma = dyn_cast<AMDWmmaEncodingAttr>(attr)) {
+    auto kWarp = StringAttr::get(attr.getContext(), "warp");
     return wmma.getCtaLayout().hasInDim(kWarp) &&
            hasSwizzledBases(wmma.getCtaLayout(), kWarp);
   }
@@ -104,7 +104,7 @@ bool sourceRequiresGenericEncoding(Attribute srcEnc) {
 
 Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
                                         Attribute srcEnc) {
-  if (sourceRequiresGenericEncoding(srcEnc)) {
+  if (isGenericEncoding(srcEnc)) {
     assert(!isPermutationMatrixLayout(ll) &&
            "Expected non-permutation layout from this source encoding");
     return GenericLinearEncodingAttr::get(ctx, std::move(ll));
@@ -296,13 +296,16 @@ SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
   auto threadOrder = enc.getThreadOrder();
   if (order == threadOrder)
     return order;
-  // If the element contiguity does not align with the thread order because the
-  // thread order dimension has contiguity of 1---meaning that the order
-  // position of this dimension is irrelevant---we prefer to use the thread
-  // order for the memory layout
+  // Heuristic:
+  // If the element contiguity does not align with the thread order
+  // because the thread order dimension has contiguity of 1---meaning that
+  // the order position of this dimension is irrelevant---we prefer
+  // to use the thread order for the memory layout  auto contig =
+  // enc.getElemsPerThread(shape);
   auto contig = enc.getElemsPerThread(shape);
-  if (contig[threadOrder[0]] == 1)
+  if (contig[threadOrder[0]] == 1) {
     return threadOrder;
+  }
   return order;
 }
 
@@ -1046,6 +1049,13 @@ void BlockedEncodingAttr::print(mlir::AsmPrinter &printer) const {
 static LogicalResult
 verifyDistributedLinearLayoutDims(function_ref<InFlightDiagnostic()> emitError,
                                   const LinearLayout &linearLayout) {
+  // Example of LinearEncodingAttr
+  // <{register = [[0, 1], [8, 0], [0, 8], [64, 0]],
+  //   lane = [[0, 2], [0, 4], [1, 0], [2, 0], [4, 0]],
+  //   warp = [[16, 0], [32, 0]],
+  //   block = []}>
+  // The input dims must be {register, lane, warp, block}
+  // The output dims of the linear layout should be dim0..dim[rank-1]
   static const auto expectedInDims =
       SmallVector<std::string>({"register", "lane", "warp", "block"});
   for (const auto &[i, dims] : llvm::enumerate(
@@ -1069,6 +1079,7 @@ verifyDistributedLinearLayoutDims(function_ref<InFlightDiagnostic()> emitError,
   return success();
 }
 
+// FIXME Can we take the LinearLayout by const&?
 LogicalResult
 LinearEncodingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                            LinearLayout linearLayout) {
@@ -1245,6 +1256,9 @@ SmallVector<unsigned> getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
   auto rank = ll.getNumOutDims();
   auto kRegister = StringAttr::get(ctx, "register");
 
+  // We canonicalize on the spot, as if we use CGAs the regs are not in
+  // canonical form The order is [reg, lane, warp, rep, block], so we first
+  // remove the blocks
   llvm::SmallVector<unsigned> ctaShape;
   for (auto [shape, cgaNum] : llvm::zip(ll.getOutDimSizes(), cgaSplitNum)) {
     ctaShape.push_back(shape / cgaNum);
@@ -1257,6 +1271,7 @@ SmallVector<unsigned> getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
   while (!registers.empty()) {
     auto &basis = registers.back();
     auto it = std::find_if(basis.begin(), basis.end(), nonZero);
+    // If there's broadcasting (base == zeros) there are no more reps
     if (it == basis.end()) {
       break;
     }
@@ -3718,8 +3733,7 @@ struct TritonGPUVerifyTensorLayoutInterface
       return makeErr()
              << "Non-distributed layout is not allowed in tensor type.";
 
-    if (sourceRequiresGenericEncoding(layout) &&
-        !isOpVettedForGenericEncoding(op)) {
+    if (isGenericEncoding(layout) && !isOpVettedForGenericEncoding(op)) {
       return makeErr() << "Encoding not compatible with LinearEncodingAttr "
                        << "(e.g., swizzled warp bases or non-injective layout) "
                        << "is not supported on " << op->getName() << ".";

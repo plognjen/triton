@@ -1,6 +1,8 @@
 #ifndef TRITON_GPU_DIALECT_INTERFACES_H
 #define TRITON_GPU_DIALECT_INTERFACES_H
 
+#include <numeric>
+
 #include "mlir/IR/OpDefinition.h"
 #include "triton/Dialect/TritonGPU/IR/CGAEncodingAttr.h"
 
