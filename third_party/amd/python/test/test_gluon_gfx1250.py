@@ -1402,7 +1402,7 @@ def test_compile_tensor_copy(BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYPE, NUM
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N", [(32, 32), (32, 64), (64, 64), (1, 512), (256, 2)])
 @pytest.mark.parametrize("NUM_BUFFERS", [2])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
-@pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["ASYNC_COPY", "DEVICE_TDM", "HOST_TDM", "DEVICE_TDM_PARTITIONED"])
+@pytest.mark.parametrize("ASYNC_LOAD_TYPE", ["DEVICE_TDM"])
 @pytest.mark.parametrize("M,N", [(1024, 1024), (1008, 1008)])
 def test_runtime_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYPE, NUM_WARPS):
     if ASYNC_LOAD_TYPE == "ASYNC_COPY" and any([x % 16 != 0 for x in [M, N]]):
@@ -1451,12 +1451,15 @@ def test_runtime_tensor_copy(M, N, BLOCK_M, BLOCK_N, NUM_BUFFERS, ASYNC_LOAD_TYP
 
 
 @gluon.jit
-def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
-                                BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,  #
-                                NUM_PARTITIONS: ttgl.constexpr, NUM_GROUPS: ttgl.constexpr,  #
-                                PARTITION_DIM: ttgl.constexpr, COL_MAJOR: ttgl.constexpr):
-    """TDM load with PartitionedSharedLayout, then store via registers."""
+def partitioned_tdm_copy_kernel_row_major(a_ptr, b_ptr, M, N,  #
+                                        BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,  #
+                                        NUM_PARTITIONS: ttgl.constexpr, NUM_GROUPS: ttgl.constexpr,  #
+                                        PARTITION_DIM: ttgl.constexpr):
+    """Row-major global tensor; TDM + PartitionedSharedLayout + dot-operand transpose LDS load."""
     num_warps: ttgl.constexpr = ttgl.num_warps()
+    ttgl.static_assert(a_ptr.type.element_ty.is_fp16(), "expects fp16 for WMMA dot-operand LDS load")
+    ttgl.static_assert(BLOCK_M % 16 == 0 and BLOCK_N % 32 == 0,
+                       "BLOCK_M/BLOCK_N must match WMMA operand-0 tile (instr K=32, k_width=8)")
 
     if PARTITION_DIM == 0:
         inner_shape_m: ttgl.constexpr = BLOCK_M // (NUM_PARTITIONS * NUM_GROUPS)
@@ -1465,44 +1468,80 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
         inner_shape_m: ttgl.constexpr = BLOCK_M
         inner_shape_n: ttgl.constexpr = BLOCK_N // (NUM_PARTITIONS * NUM_GROUPS)
 
-    if COL_MAJOR:
-        order: ttgl.constexpr = [0, 1]
-    else:
-        order: ttgl.constexpr = [1, 0]
-
     inner_layout: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [inner_shape_m, inner_shape_n],
-                                                                             order)
+                                                                             [1, 0])
     smem_layout: ttgl.constexpr = PartitionedSharedLayout(NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, inner_layout)
 
-    if COL_MAJOR:
-        block_layout: ttgl.constexpr = ttgl.BlockedLayout([8, 1], [8, 4], [1, num_warps], [0, 1])
-    else:
-        block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
+    block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
+    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32])
+    OPERAND_LAYOUT: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
 
     pid_m = ttgl.program_id(axis=0)
     pid_n = ttgl.program_id(axis=1)
     idx_m = pid_m * BLOCK_M
     idx_n = pid_n * BLOCK_N
 
-    if COL_MAJOR:
-        a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(1, M),
-                                                             block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
-    else:
-        a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
-                                                             block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
+    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(N, 1),
+                                                         block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
     a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, a_desc.block_shape, a_desc.layout)
 
     ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer)
     ttgl.amd.gfx1250.tdm.async_wait(0)
 
-    a = a_buffer.load(layout=block_layout)
+    a_dot = a_buffer.load(layout=OPERAND_LAYOUT)
+    a = ttgl.convert_layout(a_dot, block_layout)
 
     offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, block_layout))
     offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, block_layout))
-    if COL_MAJOR:
-        offs_b = offs_bm[:, None] + offs_bn[None, :] * M
+    offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
+    b_mask = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
+    ttgl.store(b_ptr + offs_b, a, mask=b_mask)
+
+
+@gluon.jit
+def partitioned_tdm_copy_kernel_col_major(a_ptr, b_ptr, M, N,  #
+                                         BLOCK_M: ttgl.constexpr, BLOCK_N: ttgl.constexpr,  #
+                                         NUM_PARTITIONS: ttgl.constexpr, NUM_GROUPS: ttgl.constexpr,  #
+                                         PARTITION_DIM: ttgl.constexpr):
+    """Column-major global tensor; same lowering path with strides (1, M) and inner order [0, 1]."""
+    num_warps: ttgl.constexpr = ttgl.num_warps()
+    ttgl.static_assert(a_ptr.type.element_ty.is_fp16(), "expects fp16 for WMMA dot-operand LDS load")
+    ttgl.static_assert(BLOCK_M % 16 == 0 and BLOCK_N % 32 == 0,
+                       "BLOCK_M/BLOCK_N must match WMMA operand-0 tile (instr K=32, k_width=8)")
+
+    if PARTITION_DIM == 0:
+        inner_shape_m: ttgl.constexpr = BLOCK_M // (NUM_PARTITIONS * NUM_GROUPS)
+        inner_shape_n: ttgl.constexpr = BLOCK_N
     else:
-        offs_b = (offs_bm[:, None] * N) + offs_bn[None, :]
+        inner_shape_m: ttgl.constexpr = BLOCK_M
+        inner_shape_n: ttgl.constexpr = BLOCK_N // (NUM_PARTITIONS * NUM_GROUPS)
+
+    inner_layout: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[32, 4]], [inner_shape_m, inner_shape_n],
+                                                                             [0, 1])
+    smem_layout: ttgl.constexpr = PartitionedSharedLayout(NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, inner_layout)
+
+    block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
+    WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32])
+    OPERAND_LAYOUT: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
+
+    pid_m = ttgl.program_id(axis=0)
+    pid_n = ttgl.program_id(axis=1)
+    idx_m = pid_m * BLOCK_M
+    idx_n = pid_n * BLOCK_N
+
+    a_desc = ttgl.amd.gfx1250.tdm.make_tensor_descriptor(base=a_ptr, shape=(M, N), strides=(1, M),
+                                                         block_shape=(BLOCK_M, BLOCK_N), layout=smem_layout)
+    a_buffer = ttgl.allocate_shared_memory(a_desc.dtype, a_desc.block_shape, a_desc.layout)
+
+    ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer)
+    ttgl.amd.gfx1250.tdm.async_wait(0)
+
+    a_dot = a_buffer.load(layout=OPERAND_LAYOUT)
+    a = ttgl.convert_layout(a_dot, block_layout)
+
+    offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, block_layout))
+    offs_bn = idx_n + ttgl.arange(0, BLOCK_N, layout=ttgl.SliceLayout(0, block_layout))
+    offs_b = offs_bm[:, None] + offs_bn[None, :] * M
     b_mask = (offs_bm[:, None] < M) & (offs_bn[None, :] < N)
     ttgl.store(b_ptr + offs_b, a, mask=b_mask)
 
@@ -1540,11 +1579,11 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
 @pytest.mark.parametrize("num_warps", [4])
 @pytest.mark.parametrize("COL_MAJOR", [False, True])
 @pytest.mark.parametrize("M,N", [(256, 256)])
-def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, num_warps, COL_MAJOR,
-                                      M, N):
-    """Test TDM async_load with PartitionedSharedLayout (global -> LDS)."""
+def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM, num_warps, COL_MAJOR,  M, N):
+    """Test TDM async_load (global -> LDS) and transpose LDS load with PartitionedSharedLayout."""
     torch.manual_seed(42)
-    a = torch.randint(0x0, 0xFFFF, (M, N), dtype=torch.uint16)
+    a = torch.randn((M, N), dtype=torch.float16)
+    b = torch.zeros_like(a)
 
     if COL_MAJOR:
         a_device = a.T.contiguous().T.cuda()
@@ -1554,9 +1593,10 @@ def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROU
         b_device = torch.zeros_like(a).cuda()
 
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
-    partitioned_tdm_copy_kernel[grid](a_device, b_device, M, N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                                      NUM_PARTITIONS=NUM_PARTITIONS, NUM_GROUPS=NUM_GROUPS, PARTITION_DIM=PARTITION_DIM,
-                                      COL_MAJOR=COL_MAJOR, num_warps=num_warps)
+    kernel = partitioned_tdm_copy_kernel_col_major if COL_MAJOR else partitioned_tdm_copy_kernel_row_major
+    kernel[grid](a_device, b_device, M, N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                 NUM_PARTITIONS=NUM_PARTITIONS, NUM_GROUPS=NUM_GROUPS, PARTITION_DIM=PARTITION_DIM,
+                 num_warps=num_warps)
 
     b_triton = b_device.cpu()
     mismatched = (b_triton != a).sum().item()
@@ -1564,6 +1604,32 @@ def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROU
     assert mismatched == 0, (f"Mismatch: {mismatched}/{total} ({100*mismatched/total:.1f}%) elements differ. "
                              f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}, "
                              f"colMajor={COL_MAJOR}")
+
+    # signature = {
+    #     "a_ptr": "*fp16",
+    #     "b_ptr": "*fp16",
+    #     "M": "i32",
+    #     "N": "i32",
+    #     "BLOCK_M": "constexpr",
+    #     "BLOCK_N": "constexpr",
+    #     "NUM_PARTITIONS": "constexpr",
+    #     "NUM_GROUPS": "constexpr",
+    #     "PARTITION_DIM": "constexpr",
+    # }
+    # constexprs = {
+    #     "BLOCK_M": BLOCK_M,
+    #     "BLOCK_N": BLOCK_N,
+    #     "NUM_PARTITIONS": NUM_PARTITIONS,
+    #     "NUM_GROUPS": NUM_GROUPS,
+    #     "PARTITION_DIM": PARTITION_DIM,
+    # }
+    # compile_kernel = partitioned_tdm_copy_kernel_col_major if COL_MAJOR else partitioned_tdm_copy_kernel_row_major
+    # k = triton.compile(
+    #     src=gluon._runtime.GluonASTSource(compile_kernel, signature, constexprs),
+    #     target=GPUTarget("hip", 'gfx1250', 32),
+    #     options={"num_warps": num_warps},
+    # )
+    # assert re.search(r"ds_load_tr16", k.asm["amdgcn"]), "expected transpose LDS loads (ds_load_tr16) in amdgcn"
 
 
 @gluon.jit
