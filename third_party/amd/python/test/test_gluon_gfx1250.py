@@ -1451,7 +1451,7 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
 
     block_layout: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [4, 8], [num_warps, 1], [1, 0])
     WMMA_LAYOUT: ttgl.constexpr = ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32])
-    OPERAND_LAYOUT: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
+    DOT_RHS_LAYOUT: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
 
     pid_m = ttgl.program_id(axis=0)
     pid_n = ttgl.program_id(axis=1)
@@ -1465,7 +1465,7 @@ def partitioned_tdm_copy_kernel(a_ptr, b_ptr, M, N,  #
     ttgl.amd.gfx1250.tdm.async_load(a_desc, [idx_m, idx_n], a_buffer)
     ttgl.amd.gfx1250.tdm.async_wait(0)
 
-    a_dot = a_buffer.load(layout=OPERAND_LAYOUT)
+    a_dot = a_buffer.load(layout=DOT_RHS_LAYOUT)
     a = ttgl.convert_layout(a_dot, block_layout)
 
     offs_bm = idx_m + ttgl.arange(0, BLOCK_M, layout=ttgl.SliceLayout(1, block_layout))
@@ -1523,7 +1523,6 @@ def test_runtime_partitioned_tdm_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROU
                              f"partitionDim={PARTITION_DIM}, numPartitions={NUM_PARTITIONS}, numGroups={NUM_GROUPS}")
 
 
-@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
 @pytest.mark.parametrize("BLOCK_M,BLOCK_N,NUM_PARTITIONS,NUM_GROUPS,PARTITION_DIM", _PARTITIONED_TDM_PARAMS)
 def test_compile_partitioned_tdm_transpose_load(BLOCK_M, BLOCK_N, NUM_PARTITIONS, NUM_GROUPS, PARTITION_DIM):
     """Check that LDS load from PartitionedSharedEncodingAttr lowers to ds_load_tr16 when appropriate."""

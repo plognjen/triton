@@ -63,8 +63,7 @@ public:
     cvtDstLL = maybeSublayout.value();
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
-    SmallVector<Value> smemBases(smemObj.getBases().begin(),
-                                 smemObj.getBases().end());
+    SmallVector<Value> smemBases = llvm::to_vector(smemObj.getBases());
     auto affineOffset = smemObj.getShmemOffset(loc, rewriter, srcTy);
     auto maskSpanAffineOffset = smemObj.getMaskSpanOffsets(srcTy);
     auto paddingShifts = getPaddedSharedShifts(srcTy.getEncoding(),
