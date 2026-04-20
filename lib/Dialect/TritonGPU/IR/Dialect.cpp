@@ -294,14 +294,14 @@ SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
   auto enc = toGenericLinearEncoding(Attribute(layout), shape);
   auto order = enc.getOrder();
   auto threadOrder = enc.getThreadOrder();
-  if (order == threadOrder)
+  if (order == threadOrder) {
     return order;
+  }
   // Heuristic:
   // If the element contiguity does not align with the thread order
   // because the thread order dimension has contiguity of 1---meaning that
   // the order position of this dimension is irrelevant---we prefer
-  // to use the thread order for the memory layout  auto contig =
-  // enc.getElemsPerThread(shape);
+  // to use the thread order for the memory layout
   auto contig = enc.getElemsPerThread(shape);
   if (contig[threadOrder[0]] == 1) {
     return threadOrder;
@@ -1277,6 +1277,7 @@ SmallVector<unsigned> getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
     }
     auto dim = it - basis.begin();
     reverseRepOrder.insert(dim);
+    // As soon as we stop finding reps, we stop
     if (dim != reverseRepOrder.back() || 2 * basis[dim] != ctaShape[dim]) {
       break;
     }
@@ -1314,6 +1315,11 @@ SmallVector<unsigned> getElemsPerThread(const LinearLayout &ll,
                                         MLIRContext *ctx,
                                         ArrayRef<unsigned> repOrder,
                                         ArrayRef<int64_t> shape) {
+  // When broadcasting the layout the shape changes, otherwise the shape is
+  // the same as the shape of the tensor
+  // We can either have BroadcastOp with SameOperandsAndResultEncoding, or keep
+  // the invariant that the shape of the LL is that of the tensor
+  // We choose the former for BC
   auto scaledLL = toLinearLayout(ll, repOrder, shape);
   auto kRegister = StringAttr::get(ctx, "register");
   return basesPerDimImpl(scaledLL.getBases(), kRegister,

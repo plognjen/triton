@@ -162,15 +162,10 @@ class SliceLayout(DistributedLayout):
 
 
 @dataclass(frozen=True)
-class GenericLinearLayout(DistributedLayout):
+class DistributedLinearLayout(DistributedLayout):
     """
-    A linear distributed layout with relaxed constraints compared to DistributedLinearLayout.
-
-    Unlike DistributedLinearLayout:
-    - Warp and block bases MAY be swizzled (non-zero in multiple output dims).
-    - The layout is NOT required to be bijective after removing broadcast bases.
-
-    Register and lane bases must still be non-swizzled.
+    Represents a linear distributed layout with explicit bases at register, lane, warp, and block levels.
+    See: https://arxiv.org/abs/2505.23819 for reference.
 
     Args:
         reg_bases (List[List[int]]): Bases for register-level distribution.
@@ -204,11 +199,11 @@ class GenericLinearLayout(DistributedLayout):
             assert len(basis) == rank
 
     def _to_ir(self, builder):
-        return builder.get_generic_linear_layout(self.reg_bases, self.lane_bases, self.warp_bases, self.block_bases,
-                                                 self.shape)
+        return builder.get_distributed_linear_layout(self.reg_bases, self.lane_bases, self.warp_bases, self.block_bases,
+                                                     self.shape)
 
     def mangle(self):
-        return f"GLL{self.reg_bases}_{self.lane_bases}_{self.warp_bases}_{self.block_bases}_{self.shape}GLL"
+        return f"DLL{self.reg_bases}_{self.lane_bases}_{self.warp_bases}_{self.block_bases}_{self.shape}DLL"
 
     def __hash__(self):
         return hash((
@@ -218,38 +213,6 @@ class GenericLinearLayout(DistributedLayout):
             tuple(map(tuple, self.block_bases)),
             tuple(self.shape),
         ))
-
-    @property
-    def rank(self):
-        return len(self.shape)
-
-
-@dataclass(frozen=True)
-class DistributedLinearLayout(GenericLinearLayout):
-    """
-    Represents a linear distributed layout with explicit bases at register, lane, warp, and block levels.
-    See: https://arxiv.org/abs/2505.23819 for reference.
-
-    Compared to GenericLinearLayout, this class enforces stricter constraints:
-    - All bases (including warp and block) must be non-swizzled.
-    - The layout must be bijective after removing broadcast bases.
-
-    Args:
-        reg_bases (List[List[int]]): Bases for register-level distribution.
-        lane_bases (List[List[int]]): Bases for lane-level distribution.
-        warp_bases (List[List[int]]): Bases for warp-level distribution.
-        block_bases (List[List[int]]): Bases for block-level distribution.
-        shape (List[int]): The tensor global shape.
-    """
-
-    def _to_ir(self, builder):
-        return builder.get_distributed_linear_layout(self.reg_bases, self.lane_bases, self.warp_bases, self.block_bases,
-                                                     self.shape)
-
-    def mangle(self):
-        return f"DLL{self.reg_bases}_{self.lane_bases}_{self.warp_bases}_{self.block_bases}_{self.shape}DLL"
-
-    __hash__ = GenericLinearLayout.__hash__
 
     @property
     def rank(self):
