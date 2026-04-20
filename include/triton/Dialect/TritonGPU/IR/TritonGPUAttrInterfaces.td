@@ -97,7 +97,12 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     "const LinearLayout &", "getLinearLayout">,
 
     // Shared defaults delegating to free functions in linear_encoding_impl.
-    InterfaceMethod<"Get the bases per dimension for a given input dimension.",
+
+    InterfaceMethod<[{
+      Generalizes getThreadsPerWarp, getWarpsPerCTA, getCTAsPerCGA to linear layouts.
+      Returns the bases of the dimensions `dimName` of the layout.
+      If skipBroadcast is false, we count a base zero.
+    }],
                     "SmallVector<unsigned>", "basesPerDim",
                     (ins "StringAttr":$dimName,
                          "bool":$skipBroadcast),
@@ -105,7 +110,12 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
       return ::mlir::triton::gpu::linear_encoding_impl::basesPerDim(
           $_attr.getLinearLayout(), dimName, skipBroadcast);
     }]>,
-    InterfaceMethod<"Get the dimension order for a given input dimension.",
+    InterfaceMethod<[{
+      Generalizes get{Warp,Thread,CTA}Order to linear layouts.
+      Returns the order of the dimensions `dimName` of the layout.
+      If more than dimension is of size one, it uses defaultOrder to determine the order
+      of the dimensions of size one.
+    }],
                     "SmallVector<unsigned>", "orderPerDim",
                     (ins "StringAttr":$dimName,
                          "ArrayRef<unsigned>":$defaultOrder),
@@ -135,6 +145,7 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
           $_attr.getLinearLayout(), $_attr.getContext(), inDim, lowerContig,
           $_attr.getOrder());
     }]>,
+    // [FIXME LL] Supports legacy behaviour. We should remove these functions.
     InterfaceMethod<"Get size per thread.",
                     "SmallVector<unsigned>", "getSizePerThread",
                     (ins), [{}], [{

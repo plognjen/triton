@@ -11,7 +11,7 @@ THREADS_PER_WARP = triton.runtime.driver.active.get_current_target().warp_size
 
 
 def _is_layout_applicable(layout) -> bool:
-    if isinstance(layout, (ttgl.BlockedLayout, ttgl.SwizzledSharedLayout, ttgl.GenericLinearLayout)):
+    if isinstance(layout, (ttgl.BlockedLayout, ttgl.SwizzledSharedLayout, ttgl.DistributedLinearLayout)):
         return True
     elif isinstance(layout, ttgl.SliceLayout):
         return _is_layout_applicable(layout.parent)
@@ -131,14 +131,14 @@ def test_scan_blocked_broadcast_layout_multiblock(device):
 
 
 def _swizzled_warp_layouts_1d():
-    """1D GenericLinearLayout test layouts (non-injective, requiring GenericLinearEncoding)."""
+    """1D DistributedLinearLayout test layouts (non-injective, lowered as GenericLinearEncoding)."""
 
     def ilog2(x):
         return x.bit_length() - 1
 
     return [
         # Non-injective 1D: warp bases overlap with lane coverage
-        ttgl.GenericLinearLayout(
+        ttgl.DistributedLinearLayout(
             reg_bases=[[1], [2]],
             lane_bases=[[4], [8], [16], [32], [64]] + ([[0]] * (ilog2(THREADS_PER_WARP) - 5)),
             warp_bases=[[64], [128]],
@@ -146,7 +146,7 @@ def _swizzled_warp_layouts_1d():
             shape=[256],
         ),
         # Non-injective 1D: warp bases overlap with register coverage
-        ttgl.GenericLinearLayout(
+        ttgl.DistributedLinearLayout(
             reg_bases=[[1], [2], [4]],
             lane_bases=[[8], [16], [32], [64], [128]] + ([[0]] * (ilog2(THREADS_PER_WARP) - 5)),
             warp_bases=[[4], [256]],
@@ -157,14 +157,14 @@ def _swizzled_warp_layouts_1d():
 
 
 def _swizzled_warp_layouts_2d():
-    """2D GenericLinearLayout test layouts (swizzled warp bases and/or non-injective)."""
+    """2D DistributedLinearLayout test layouts (swizzled warp bases and/or non-injective)."""
 
     def ilog2(x):
         return x.bit_length() - 1
 
     return [
         # Mildly swizzled: one warp base touches both dims
-        ttgl.GenericLinearLayout(
+        ttgl.DistributedLinearLayout(
             reg_bases=[[1, 0], [0, 1]],
             lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
             warp_bases=[[16, 8], [0, 8]],
@@ -172,7 +172,7 @@ def _swizzled_warp_layouts_2d():
             shape=[32, 16],
         ),
         # Aggressively swizzled: both warp bases touch both dims
-        ttgl.GenericLinearLayout(
+        ttgl.DistributedLinearLayout(
             reg_bases=[[1, 0], [0, 1]],
             lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
             warp_bases=[[4, 2], [8, 4]],
@@ -180,7 +180,7 @@ def _swizzled_warp_layouts_2d():
             shape=[16, 8],
         ),
         # Swizzled warp + broadcasting in registers
-        ttgl.GenericLinearLayout(
+        ttgl.DistributedLinearLayout(
             reg_bases=[[1, 0], [0, 0], [0, 1]],
             lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
             warp_bases=[[16, 8], [0, 8]],
@@ -188,7 +188,7 @@ def _swizzled_warp_layouts_2d():
             shape=[32, 16],
         ),
         # non-injective
-        ttgl.GenericLinearLayout(
+        ttgl.DistributedLinearLayout(
             reg_bases=[[0, 1], [0, 2], [0, 4], [0, 16], [32, 0]],
             lane_bases=[[1, 0], [2, 0], [4, 0], [8, 0], [0, 8]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
             warp_bases=[[32, 0], [16, 0]],
@@ -199,11 +199,11 @@ def _swizzled_warp_layouts_2d():
 
 
 def _swizzled_warp_layouts():
-    """All GenericLinearLayout test layouts (1D and 2D)."""
+    """All swizzled/non-injective DistributedLinearLayout test layouts (1D and 2D)."""
     return _swizzled_warp_layouts_1d() + _swizzled_warp_layouts_2d()
 
 
-# ===--- Tests with GenericLinearLayout ---===
+# ===--- Tests with swizzled/non-injective DistributedLinearLayout ---===
 
 
 @pytest.mark.parametrize("src_layout", _filter_layouts(_swizzled_warp_layouts()))
