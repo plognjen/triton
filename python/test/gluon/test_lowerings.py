@@ -1717,14 +1717,37 @@ def test_gather_layouts(axis, src_layout, index_layout, src_shape, idx_shape, de
 
 @pytest.mark.parametrize("M, N, M_tile_size, N_tile_size",
                          [[128, 128, 64, 64], [128, 128, 64, 32], [128, 64, 64, 32], [256, 128, 64, 64]])
-def test_memdesc_subslice(M, N, M_tile_size, N_tile_size, device):
+@pytest.mark.parametrize("shared_layout_cfg", [
+    pytest.param(("swizzled", None, None, None), id="swizzled"),
+    pytest.param(("partitioned", 0, 2, 1), id="partitioned-dim0-p2-g1"),
+    pytest.param(("partitioned", 0, 2, 2), id="partitioned-dim0-p2-g2"),
+    pytest.param(("partitioned", 0, 4, 1), id="partitioned-dim0-p4-g1"),
+    pytest.param(("partitioned", 1, 2, 1), id="partitioned-dim1-p2-g1"),
+    pytest.param(("partitioned", 1, 2, 2), id="partitioned-dim1-p2-g2"),
+    pytest.param(("partitioned", 1, 4, 1), id="partitioned-dim1-p4-g1"),
+])
+def test_memdesc_subslice(M, N, M_tile_size, N_tile_size, shared_layout_cfg, device):
     if M % M_tile_size != 0 or N % N_tile_size != 0:
         pytest.skip(f"Shape size ({M}, {N}) must be divisible by tile size ({M_tile_size}, {N_tile_size})")
+
+    layout_type, partition_dim, num_partitions, num_groups = shared_layout_cfg
+    if layout_type == "swizzled":
+        shared_layout = ttgl.SwizzledSharedLayout(vec=8, per_phase=1, max_phase=8, order=[1, 0])
+    else:
+        assert layout_type == "partitioned"
+        if is_cuda():
+            pytest.skip("PartitionedSharedLayout is not supported in NV backend")
+        inner_layout = ttgl.SwizzledSharedLayout(vec=4, per_phase=2, max_phase=8, order=[1, 0])
+        shared_layout = PartitionedSharedLayout(
+            num_partitions=num_partitions,
+            num_groups=num_groups,
+            partition_dim=partition_dim,
+            partition_layout=inner_layout,
+        )
 
     num_rows_per_warp = THREADS_PER_WARP // 4
     blocked_layout = ttgl.BlockedLayout(size_per_thread=[1, 8], threads_per_warp=[num_rows_per_warp, 4],
                                         warps_per_cta=[4, 1], order=[1, 0])
-    shared_layout = ttgl.SwizzledSharedLayout(vec=8, per_phase=1, max_phase=8, order=[1, 0])
 
     @gluon.jit
     def kernel(
