@@ -101,15 +101,22 @@ struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
   SideEffects::Resource *getParent() const override { return nullptr; }
 };
 
+// Returns true iff every non-broadcast basis of `ll`, after flattening in and
+// out dimensions, maps to a single power-of-2 in the flattened output. Unlike
+// `isPermutationMatrixLayout` this does not require the layout to be
+// bijective, so it is safe to call on single-dimension sublayouts.
+bool hasPowerOfTwoBases(const LinearLayout &ll);
+
 // Check whether after removing broadcast bases the flattened layout is a
-// permutation matrix (each non-broadcast basis maps to a distinct power-of-2).
+// permutation matrix (each non-broadcast basis maps to a distinct power-of-2
+// and the remaining layout is bijective).
 bool isPermutationMatrixLayout(const LinearLayout &ll);
 
 // Returns whether the attribute is a GenericLinearEncoding, a WMMA with warp
 // swizzling or a slice or DotOp of one of these.
-bool isGenericEncoding(Attribute attr);
+bool isGenericLinearEncoding(Attribute attr);
 
-// Create a GenericLinearEncoding if the source isGenericEncoding, and a
+// Create a GenericLinearEncoding if the source isGenericLinearEncoding, and a
 // LinearEncoding otherwise.
 Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
                                         Attribute srcEnc);

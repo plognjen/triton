@@ -665,7 +665,24 @@ def LinearEncodingAttr
   let mnemonic = "linear";
 
   let description = [{
-    See the docs in LinearLayout.h for the definition of linear layouts.
+    An encoding backed by a LinearLayout with input dims
+    {register, lane, warp, block} and output dims {dim0, dim1, ...}. See the
+    docs in LinearLayout.h for the general definition of linear layouts;
+    this attribute is a strictly more restricted form of that abstraction.
+
+    Compared to GenericLinearEncodingAttr, this is the most constrained
+    LinearLayout-based encoding:
+    - Every basis vector (register, lane, warp, and block) must be
+      non-swizzled, i.e. have at most one non-zero output component (the
+      basis either moves along a single output dim, or is a broadcast/zero
+      basis).
+    - After removing broadcast bases the layout must be bijective.
+
+    GenericLinearEncodingAttr relaxes the above in two ways:
+    - Warp bases MAY be swizzled (non-zero in multiple output dims).
+      Register, lane, and block bases must still be non-swizzled.
+    - The layout is only required to be surjective (not bijective) after
+      removing broadcast bases.
   }];
 
   let extraClassDeclaration = extraLinearDistributedDeclaration # [{

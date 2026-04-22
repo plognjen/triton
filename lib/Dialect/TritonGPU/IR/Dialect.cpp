@@ -37,7 +37,6 @@ using namespace mlir::triton::gpu;
 static SmallVector<unsigned>
 basesPerDimImpl(const LinearLayout::BasesT &namedBases, StringAttr dimName,
                 size_t rank, bool skipBroadcast = true);
-static bool hasSwizzledBases(const LinearLayout &ll, StringAttr dimName);
 
 // Utility
 namespace mlir {
@@ -72,31 +71,37 @@ LinearEncodingAttr toLinearEncoding(RankedTensorType type) {
       type.getShape(), type.getEncoding());
 }
 
-bool isPermutationMatrixLayout(const LinearLayout &ll) {
+bool hasPowerOfTwoBases(const LinearLayout &ll) {
   LinearLayout flattened = ll.flattenIns().flattenOuts();
   auto inDim = *flattened.getInDimNames().begin();
   LinearLayout withoutBroadcast = flattened.removeZeroBasesAlongDim(inDim);
-  if (!llvm::all_of(
-          withoutBroadcast.getBases().lookup(inDim),
-          [](const auto &basis) { return llvm::isPowerOf2_32(basis.front()); }))
-    return false;
-  return withoutBroadcast.isInvertible();
+  return llvm::all_of(
+      withoutBroadcast.getBases().lookup(inDim),
+      [](const auto &basis) { return llvm::isPowerOf2_32(basis.front()); });
 }
 
-bool isGenericEncoding(Attribute attr) {
+bool isPermutationMatrixLayout(const LinearLayout &ll) {
+  if (!hasPowerOfTwoBases(ll))
+    return false;
+  LinearLayout flattened = ll.flattenIns().flattenOuts();
+  auto inDim = *flattened.getInDimNames().begin();
+  return flattened.removeZeroBasesAlongDim(inDim).isInvertible();
+}
+
+bool isGenericLinearEncoding(Attribute attr) {
   if (isa<GenericLinearEncodingAttr>(attr))
     return true;
 
   // Unwrap wrapper encodings to find the root layout.
   if (auto dotOp = dyn_cast<DotOperandEncodingAttr>(attr))
-    return isGenericEncoding(dotOp.getParent());
+    return isGenericLinearEncoding(dotOp.getParent());
   if (auto slice = dyn_cast<SliceEncodingAttr>(attr))
-    return isGenericEncoding(slice.getParent());
+    return isGenericLinearEncoding(slice.getParent());
 
   if (auto wmma = dyn_cast<AMDWmmaEncodingAttr>(attr)) {
     auto kWarp = StringAttr::get(attr.getContext(), "warp");
     return wmma.getCtaLayout().hasInDim(kWarp) &&
-           hasSwizzledBases(wmma.getCtaLayout(), kWarp);
+           !isPermutationMatrixLayout(wmma.getCtaLayout());
   }
 
   return false;
@@ -104,7 +109,7 @@ bool isGenericEncoding(Attribute attr) {
 
 Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
                                         Attribute srcEnc) {
-  if (isGenericEncoding(srcEnc)) {
+  if (isGenericLinearEncoding(srcEnc)) {
     assert(!isPermutationMatrixLayout(ll) &&
            "Expected non-permutation layout from this source encoding");
     return GenericLinearEncodingAttr::get(ctx, std::move(ll));
@@ -1199,40 +1204,35 @@ linearToCGAEncodingAttr(const LinearLayout &ll,
 }
 
 //===----------------------------------------------------------------------===//
-// linear_encoding_impl — free functions for LinearEncodingTrait defaults
+// LinearEncodingTrait shared implementations
 //===----------------------------------------------------------------------===//
 
-static bool hasSwizzledBases(const LinearLayout &ll, StringAttr dimName) {
-  auto nonZero = [](auto val) { return val != 0; };
-  const auto &dimBases = ll.getBases().find(dimName)->second;
-  return llvm::any_of(dimBases, [&](const auto &basis) {
-    return std::count_if(basis.begin(), basis.end(), nonZero) > 1;
-  });
-}
-
-namespace mlir::triton::gpu::linear_encoding_impl {
-
-SmallVector<unsigned> basesPerDim(const LinearLayout &ll, StringAttr dimName,
-                                  bool skipBroadcast) {
-  if (hasSwizzledBases(ll, dimName))
+SmallVector<unsigned> LinearEncodingTrait::basesPerDim(const LinearLayout &ll,
+                                                       StringAttr dimName,
+                                                       bool skipBroadcast) {
+  auto dimLayout =
+      ll.sublayout({dimName}, llvm::to_vector(ll.getOutDimNames()));
+  if (!hasPowerOfTwoBases(dimLayout))
     llvm_unreachable("basesPerDim cannot decompose swizzled bases into "
                      "per-dimension counts.");
   auto rank = ll.getNumOutDims();
   return basesPerDimImpl(ll.getBases(), dimName, rank, skipBroadcast);
 }
 
-SmallVector<unsigned> orderPerDim(const LinearLayout &ll, StringAttr dimName,
-                                  ArrayRef<unsigned> defaultOrder) {
-  if (hasSwizzledBases(ll, dimName))
+SmallVector<unsigned>
+LinearEncodingTrait::orderPerDim(const LinearLayout &ll, StringAttr dimName,
+                                 ArrayRef<unsigned> defaultOrder) {
+  auto dimLayout =
+      ll.sublayout({dimName}, llvm::to_vector(ll.getOutDimNames()));
+  if (!hasPowerOfTwoBases(dimLayout))
     llvm_unreachable(
         "orderPerDim cannot determine dimension order for swizzled bases.");
   return orderPerDimImpl(ll, dimName, defaultOrder);
 }
 
-SmallVector<unsigned> getContig(const LinearLayout &ll, MLIRContext *ctx,
-                                const char *inDim,
-                                SmallVector<unsigned> lowerContig,
-                                ArrayRef<unsigned> order) {
+SmallVector<unsigned> LinearEncodingTrait::getContig(
+    const LinearLayout &ll, MLIRContext *ctx, const char *inDim,
+    SmallVector<unsigned> lowerContig, ArrayRef<unsigned> order) {
   const auto &bases = ll.getBases().find(StringAttr::get(ctx, inDim))->second;
   auto rank = order.size();
 
@@ -1251,8 +1251,9 @@ SmallVector<unsigned> getContig(const LinearLayout &ll, MLIRContext *ctx,
   return contig;
 }
 
-SmallVector<unsigned> getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
-                                       ArrayRef<unsigned> cgaSplitNum) {
+SmallVector<unsigned>
+LinearEncodingTrait::getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
+                                      ArrayRef<unsigned> cgaSplitNum) {
   auto rank = ll.getNumOutDims();
   auto kRegister = StringAttr::get(ctx, "register");
 
@@ -1287,14 +1288,16 @@ SmallVector<unsigned> getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
   return basesPerDimImpl(bases, kRegister, rank);
 }
 
-CGAEncodingAttr getCGALayout(const LinearLayout &ll, MLIRContext *ctx) {
+CGAEncodingAttr LinearEncodingTrait::getCGALayout(const LinearLayout &ll,
+                                                  MLIRContext *ctx) {
   auto splitNum =
       basesPerDim(ll, StringAttr::get(ctx, "block"), /*skipBroadcast=*/true);
   return linearToCGAEncodingAttr(ll, splitNum);
 }
 
-LinearLayout toLinearLayout(const LinearLayout &ll, ArrayRef<unsigned> repOrder,
-                            ArrayRef<int64_t> shape) {
+LinearLayout LinearEncodingTrait::toLinearLayout(const LinearLayout &ll,
+                                                 ArrayRef<unsigned> repOrder,
+                                                 ArrayRef<int64_t> shape) {
   auto result = ll;
   auto canonicalDims = llvm::to_vector(ll.getOutDimNames());
   llvm::SmallDenseMap<StringAttr, int64_t> namedShape;
@@ -1311,10 +1314,10 @@ LinearLayout toLinearLayout(const LinearLayout &ll, ArrayRef<unsigned> repOrder,
   return result;
 }
 
-SmallVector<unsigned> getElemsPerThread(const LinearLayout &ll,
-                                        MLIRContext *ctx,
-                                        ArrayRef<unsigned> repOrder,
-                                        ArrayRef<int64_t> shape) {
+SmallVector<unsigned>
+LinearEncodingTrait::getElemsPerThread(const LinearLayout &ll, MLIRContext *ctx,
+                                       ArrayRef<unsigned> repOrder,
+                                       ArrayRef<int64_t> shape) {
   // When broadcasting the layout the shape changes, otherwise the shape is
   // the same as the shape of the tensor
   // We can either have BroadcastOp with SameOperandsAndResultEncoding, or keep
@@ -1326,16 +1329,14 @@ SmallVector<unsigned> getElemsPerThread(const LinearLayout &ll,
                          scaledLL.getNumOutDims(), /*skipBroadcast=*/false);
 }
 
-unsigned getTotalElemsPerThread(const LinearLayout &ll, MLIRContext *ctx,
-                                ArrayRef<unsigned> repOrder,
-                                ArrayRef<int64_t> shape) {
+unsigned LinearEncodingTrait::getTotalElemsPerThread(
+    const LinearLayout &ll, MLIRContext *ctx, ArrayRef<unsigned> repOrder,
+    ArrayRef<int64_t> shape) {
   return product(getElemsPerThread(ll, ctx, repOrder, shape));
 }
 
-} // namespace mlir::triton::gpu::linear_encoding_impl
-
 CGAEncodingAttr LinearEncodingAttr::getCGALayout() const {
-  return linear_encoding_impl::getCGALayout(getLinearLayout(), getContext());
+  return LinearEncodingTrait::getCGALayout(getLinearLayout(), getContext());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1399,7 +1400,7 @@ Attribute GenericLinearEncodingAttr::parse(AsmParser &parser, Type type) {
 }
 
 CGAEncodingAttr GenericLinearEncodingAttr::getCGALayout() const {
-  return linear_encoding_impl::getCGALayout(getLinearLayout(), getContext());
+  return LinearEncodingTrait::getCGALayout(getLinearLayout(), getContext());
 }
 
 //===----------------------------------------------------------------------===//
@@ -3739,7 +3740,7 @@ struct TritonGPUVerifyTensorLayoutInterface
       return makeErr()
              << "Non-distributed layout is not allowed in tensor type.";
 
-    if (isGenericEncoding(layout) && !isOpVettedForGenericEncoding(op)) {
+    if (isGenericLinearEncoding(layout) && !isOpVettedForGenericEncoding(op)) {
       return makeErr() << "Encoding not compatible with LinearEncodingAttr "
                        << "(e.g., swizzled warp bases or non-injective layout) "
                        << "is not supported on " << op->getName() << ".";
