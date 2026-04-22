@@ -96,8 +96,6 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
     InterfaceMethod<"Get the underlying linear layout.",
                     "const LinearLayout &", "getLinearLayout">,
 
-    // Shared defaults delegating to free functions in linear_encoding_impl.
-
     InterfaceMethod<[{
       Generalizes getThreadsPerWarp, getWarpsPerCTA, getCTAsPerCGA to linear layouts.
       Returns the bases of the dimensions `dimName` of the layout.
@@ -107,7 +105,7 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     (ins "StringAttr":$dimName,
                          "bool":$skipBroadcast),
                     [{}], [{
-      return ::mlir::triton::gpu::linear_encoding_impl::basesPerDim(
+      return LinearEncodingTrait::basesPerDim(
           $_attr.getLinearLayout(), dimName, skipBroadcast);
     }]>,
     InterfaceMethod<[{
@@ -120,7 +118,7 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     (ins "StringAttr":$dimName,
                          "ArrayRef<unsigned>":$defaultOrder),
                     [{}], [{
-      return ::mlir::triton::gpu::linear_encoding_impl::orderPerDim(
+      return LinearEncodingTrait::orderPerDim(
           $_attr.getLinearLayout(), dimName, defaultOrder);
     }]>,
     InterfaceMethod<"Get the layout order.",
@@ -141,7 +139,7 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     (ins "const char *":$inDim,
                          "SmallVector<unsigned>":$lowerContig),
                     [{}], [{
-      return ::mlir::triton::gpu::linear_encoding_impl::getContig(
+      return LinearEncodingTrait::getContig(
           $_attr.getLinearLayout(), $_attr.getContext(), inDim, lowerContig,
           $_attr.getOrder());
     }]>,
@@ -150,13 +148,13 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     "SmallVector<unsigned>", "getSizePerThread",
                     (ins), [{}], [{
       auto cgaSplitNum = $_attr.getCGALayout().getCTASplitNum();
-      return ::mlir::triton::gpu::linear_encoding_impl::getSizePerThread(
+      return LinearEncodingTrait::getSizePerThread(
           $_attr.getLinearLayout(), $_attr.getContext(), cgaSplitNum);
     }]>,
     InterfaceMethod<"Get the CGA layout.",
                     "CGAEncodingAttr", "getCGALayout",
                     (ins), [{}], [{
-      return ::mlir::triton::gpu::linear_encoding_impl::getCGALayout(
+      return LinearEncodingTrait::getCGALayout(
           $_attr.getLinearLayout(), $_attr.getContext());
     }]>,
     InterfaceMethod<"Convert to LinearLayout.",
@@ -164,7 +162,7 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     (ins "ArrayRef<int64_t>":$shape),
                     [{}], [{
       auto repOrder = $_attr.getRepOrder();
-      return ::mlir::triton::gpu::linear_encoding_impl::toLinearLayout(
+      return LinearEncodingTrait::toLinearLayout(
           $_attr.getLinearLayout(), repOrder, shape);
     }]>,
 
@@ -205,17 +203,44 @@ def LinearEncodingTrait : AttrInterface<"LinearEncodingTrait"> {
                     "SmallVector<unsigned>", "getElemsPerThread",
                     (ins "ArrayRef<int64_t>":$shape),
                     [{}], [{
-      return ::mlir::triton::gpu::linear_encoding_impl::getElemsPerThread(
+      return LinearEncodingTrait::getElemsPerThread(
           $_attr.getLinearLayout(), $_attr.getContext(), $_attr.getOrder(), shape);
     }]>,
     InterfaceMethod<"Get total elements per thread (overrides DistributedEncodingTrait default).",
                     "unsigned", "getTotalElemsPerThread",
                     (ins "ArrayRef<int64_t>":$shape),
                     [{}], [{
-      return ::mlir::triton::gpu::linear_encoding_impl::getTotalElemsPerThread(
+      return LinearEncodingTrait::getTotalElemsPerThread(
           $_attr.getLinearLayout(), $_attr.getContext(), $_attr.getOrder(), shape);
     }]>,
   ];
+  let extraClassDeclaration = [{
+    static SmallVector<unsigned> basesPerDim(const LinearLayout &ll,
+                                             StringAttr dimName,
+                                             bool skipBroadcast);
+    static SmallVector<unsigned> orderPerDim(const LinearLayout &ll,
+                                             StringAttr dimName,
+                                             ArrayRef<unsigned> defaultOrder);
+    static SmallVector<unsigned> getContig(const LinearLayout &ll,
+                                           MLIRContext *ctx,
+                                           const char *inDim,
+                                           SmallVector<unsigned> lowerContig,
+                                           ArrayRef<unsigned> order);
+    static SmallVector<unsigned> getSizePerThread(
+        const LinearLayout &ll, MLIRContext *ctx,
+        ArrayRef<unsigned> cgaSplitNum);
+    static CGAEncodingAttr getCGALayout(const LinearLayout &ll,
+                                        MLIRContext *ctx);
+    static LinearLayout toLinearLayout(const LinearLayout &ll,
+                                       ArrayRef<unsigned> repOrder,
+                                       ArrayRef<int64_t> shape);
+    static SmallVector<unsigned> getElemsPerThread(
+        const LinearLayout &ll, MLIRContext *ctx,
+        ArrayRef<unsigned> repOrder, ArrayRef<int64_t> shape);
+    static unsigned getTotalElemsPerThread(
+        const LinearLayout &ll, MLIRContext *ctx,
+        ArrayRef<unsigned> repOrder, ArrayRef<int64_t> shape);
+  }];
 }
 def DeclareLinearEncodingMethods : DeclareAttrInterfaceMethods<
   LinearEncodingTrait, ["getLinearLayout"]>;

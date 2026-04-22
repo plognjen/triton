@@ -52,7 +52,7 @@ struct ConvertLayoutOpConversion
     auto dims = conversion.getInDimNames();
     auto srcEnc = cast<RankedTensorType>(srcTy).getEncoding();
     auto dstEnc = cast<RankedTensorType>(dstTy).getEncoding();
-    if ((isGenericEncoding(srcEnc) || isGenericEncoding(dstEnc)) &&
+    if ((isGenericLinearEncoding(srcEnc) || isGenericLinearEncoding(dstEnc)) &&
         llvm::range_size(dims) > 1)
       return op.emitError("ConvertLayoutOp  supports GenericLinearEncoding "
                           " only when the conversion is transfer between "
