@@ -102,9 +102,7 @@ struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
 };
 
 // Returns true iff every non-broadcast basis of `ll`, after flattening in and
-// out dimensions, maps to a single power-of-2 in the flattened output. Unlike
-// `isPermutationMatrixLayout` this does not require the layout to be
-// bijective, so it is safe to call on single-dimension sublayouts.
+// out dimensions, maps to a single power-of-2 in the flattened output.
 bool hasPowerOfTwoBases(const LinearLayout &ll);
 
 // Check whether after removing broadcast bases the flattened layout is a
@@ -125,6 +123,12 @@ Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
 LinearEncodingAttr toLinearEncoding(RankedTensorType type);
 LinearEncodingAttr toLinearEncoding(DistributedEncodingTrait layout,
                                     ArrayRef<int64_t> shape);
+
+// Convert a distributed layout to a generic linear encoding
+GenericLinearEncodingAttr toGenericLinearEncoding(RankedTensorType type);
+GenericLinearEncodingAttr
+toGenericLinearEncoding(DistributedEncodingTrait layout,
+                        ArrayRef<int64_t> shape);
 
 unsigned getTotalElemsPerThread(Type type);
 

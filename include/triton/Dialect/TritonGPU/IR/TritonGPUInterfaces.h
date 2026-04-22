@@ -1,14 +1,11 @@
 #ifndef TRITON_GPU_DIALECT_INTERFACES_H
 #define TRITON_GPU_DIALECT_INTERFACES_H
 
-#include <numeric>
-
 #include "mlir/IR/OpDefinition.h"
 #include "triton/Dialect/TritonGPU/IR/CGAEncodingAttr.h"
 
 // clang-format off
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
-
 #include "triton/Dialect/TritonGPU/IR/AttrInterfaces.h.inc"
 #include "triton/Dialect/TritonGPU/IR/OpInterfaces.h.inc"
 // clang-format on

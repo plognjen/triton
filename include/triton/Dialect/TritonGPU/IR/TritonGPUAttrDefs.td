@@ -301,7 +301,7 @@ For identity mappings a short form based on order and shape is used to increase 
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
     // Returns the order of the dimensions `dimName` of the layout.
-    // If more than dimension is of size one, it uses defaultOrder to determine
+    // If more than one dimension is of size one, it uses defaultOrder to determine
     // the order of the dimensions of size one.
     SmallVector<unsigned> orderPerDim(StringAttr dimName,
                                       ArrayRef<unsigned> defaultOrder) const;
@@ -670,7 +670,7 @@ def LinearEncodingAttr
     docs in LinearLayout.h for the general definition of linear layouts;
     this attribute is a strictly more restricted form of that abstraction.
 
-    Compared to GenericLinearEncodingAttr, this is the most constrained
+    Compared to GenericLinearEncodingAttr, this is more constrained
     LinearLayout-based encoding:
     - Every basis vector (register, lane, warp, and block) must be
       non-swizzled, i.e. have at most one non-zero output component (the

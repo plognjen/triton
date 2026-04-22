@@ -97,12 +97,8 @@ bool isGenericLinearEncoding(Attribute attr) {
     return isGenericLinearEncoding(dotOp.getParent());
   if (auto slice = dyn_cast<SliceEncodingAttr>(attr))
     return isGenericLinearEncoding(slice.getParent());
-
-  if (auto wmma = dyn_cast<AMDWmmaEncodingAttr>(attr)) {
-    auto kWarp = StringAttr::get(attr.getContext(), "warp");
-    return wmma.getCtaLayout().hasInDim(kWarp) &&
-           !isPermutationMatrixLayout(wmma.getCtaLayout());
-  }
+  if (auto wmma = dyn_cast<AMDWmmaEncodingAttr>(attr))
+    return !isPermutationMatrixLayout(wmma.getCtaLayout());
 
   return false;
 }
@@ -117,24 +113,27 @@ Attribute inferEncodingFromLinearLayout(MLIRContext *ctx, LinearLayout ll,
   return LinearEncodingAttr::get(ctx, std::move(ll));
 }
 
-static GenericLinearEncodingAttr
-toGenericLinearEncoding(Attribute layout, ArrayRef<int64_t> shape) {
+GenericLinearEncodingAttr
+toGenericLinearEncoding(DistributedEncodingTrait layout,
+                        ArrayRef<int64_t> shape) {
   auto ll = toLinearLayout(shape, layout);
   return GenericLinearEncodingAttr::get(layout.getContext(), std::move(ll));
 }
 
-static GenericLinearEncodingAttr
-toGenericLinearEncoding(RankedTensorType type) {
-  return toGenericLinearEncoding(type.getEncoding(), type.getShape());
+GenericLinearEncodingAttr toGenericLinearEncoding(RankedTensorType type) {
+  return toGenericLinearEncoding(
+      cast<DistributedEncodingTrait>(type.getEncoding()), type.getShape());
 }
 
 unsigned getTotalElemsPerThread(Attribute layout, ArrayRef<int64_t> shape) {
-  return toGenericLinearEncoding(layout, shape).getTotalElemsPerThread(shape);
+  return toGenericLinearEncoding(cast<DistributedEncodingTrait>(layout), shape)
+      .getTotalElemsPerThread(shape);
 }
 
 SmallVector<unsigned> getElemsPerThread(Attribute layout,
                                         ArrayRef<int64_t> shape) {
-  return toGenericLinearEncoding(layout, shape).getElemsPerThread(shape);
+  return toGenericLinearEncoding(cast<DistributedEncodingTrait>(layout), shape)
+      .getElemsPerThread(shape);
 }
 
 SmallVector<unsigned> getElemsPerThread(Type type) {
@@ -177,7 +176,8 @@ inferFp4ToFpResultType(RankedTensorType srcType, Type elemType, int32_t axis,
 
 SmallVector<unsigned> getThreadsPerWarp(Attribute layout,
                                         ArrayRef<int64_t> shape) {
-  return toGenericLinearEncoding(layout, shape).getThreadsPerWarp();
+  return toGenericLinearEncoding(cast<DistributedEncodingTrait>(layout), shape)
+      .getThreadsPerWarp();
 }
 
 SmallVector<unsigned> getWarpsPerCTA(Attribute layout,
@@ -291,14 +291,14 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
 
 SmallVector<unsigned> getOrder(DistributedEncodingTrait layout,
                                ArrayRef<int64_t> shape) {
-  return toGenericLinearEncoding(Attribute(layout), shape).getOrder();
+  return toGenericLinearEncoding(layout, shape).getOrder();
 }
 
 SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
                                         ArrayRef<int64_t> shape) {
-  auto enc = toGenericLinearEncoding(Attribute(layout), shape);
-  auto order = enc.getOrder();
-  auto threadOrder = enc.getThreadOrder();
+  auto linear = toGenericLinearEncoding(layout, shape);
+  auto order = linear.getOrder();
+  auto threadOrder = linear.getThreadOrder();
   if (order == threadOrder) {
     return order;
   }
@@ -307,7 +307,7 @@ SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
   // because the thread order dimension has contiguity of 1---meaning that
   // the order position of this dimension is irrelevant---we prefer
   // to use the thread order for the memory layout
-  auto contig = enc.getElemsPerThread(shape);
+  auto contig = linear.getElemsPerThread(shape);
   if (contig[threadOrder[0]] == 1) {
     return threadOrder;
   }
@@ -316,7 +316,7 @@ SmallVector<unsigned> getOrderForMemory(DistributedEncodingTrait layout,
 
 SmallVector<unsigned> getThreadOrder(DistributedEncodingTrait layout,
                                      ArrayRef<int64_t> shape) {
-  return toGenericLinearEncoding(Attribute(layout), shape).getThreadOrder();
+  return toGenericLinearEncoding(layout, shape).getThreadOrder();
 }
 
 SmallVector<unsigned> getWarpOrder(DistributedEncodingTrait layout,
@@ -1061,6 +1061,7 @@ verifyDistributedLinearLayoutDims(function_ref<InFlightDiagnostic()> emitError,
   //   block = []}>
   // The input dims must be {register, lane, warp, block}
   // The output dims of the linear layout should be dim0..dim[rank-1]
+
   static const auto expectedInDims =
       SmallVector<std::string>({"register", "lane", "warp", "block"});
   for (const auto &[i, dims] : llvm::enumerate(
@@ -1230,9 +1231,20 @@ LinearEncodingTrait::orderPerDim(const LinearLayout &ll, StringAttr dimName,
   return orderPerDimImpl(ll, dimName, defaultOrder);
 }
 
-SmallVector<unsigned> LinearEncodingTrait::getContig(
-    const LinearLayout &ll, MLIRContext *ctx, const char *inDim,
-    SmallVector<unsigned> lowerContig, ArrayRef<unsigned> order) {
+// Extracts the MLIRContext from a LinearLayout by peeking at one of its
+// (StringAttr) input-dimension names. LinearLayouts constructed for distributed
+// encodings always have at least one input dimension.
+static MLIRContext *getContextFromLL(const LinearLayout &ll) {
+  assert(!ll.getBases().empty() &&
+         "LinearLayout must have at least one input dim to extract context");
+  return (*ll.getInDimNames().begin()).getContext();
+}
+
+SmallVector<unsigned>
+LinearEncodingTrait::getContig(const LinearLayout &ll, const char *inDim,
+                               SmallVector<unsigned> lowerContig,
+                               ArrayRef<unsigned> order) {
+  auto *ctx = getContextFromLL(ll);
   const auto &bases = ll.getBases().find(StringAttr::get(ctx, inDim))->second;
   auto rank = order.size();
 
@@ -1252,10 +1264,10 @@ SmallVector<unsigned> LinearEncodingTrait::getContig(
 }
 
 SmallVector<unsigned>
-LinearEncodingTrait::getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
+LinearEncodingTrait::getSizePerThread(const LinearLayout &ll,
                                       ArrayRef<unsigned> cgaSplitNum) {
   auto rank = ll.getNumOutDims();
-  auto kRegister = StringAttr::get(ctx, "register");
+  auto kRegister = StringAttr::get(getContextFromLL(ll), "register");
 
   // We canonicalize on the spot, as if we use CGAs the regs are not in
   // canonical form The order is [reg, lane, warp, rep, block], so we first
@@ -1288,10 +1300,10 @@ LinearEncodingTrait::getSizePerThread(const LinearLayout &ll, MLIRContext *ctx,
   return basesPerDimImpl(bases, kRegister, rank);
 }
 
-CGAEncodingAttr LinearEncodingTrait::getCGALayout(const LinearLayout &ll,
-                                                  MLIRContext *ctx) {
+CGAEncodingAttr LinearEncodingTrait::getCGALayout(const LinearLayout &ll) {
   auto splitNum =
-      basesPerDim(ll, StringAttr::get(ctx, "block"), /*skipBroadcast=*/true);
+      basesPerDim(ll, StringAttr::get(getContextFromLL(ll), "block"),
+                  /*skipBroadcast=*/true);
   return linearToCGAEncodingAttr(ll, splitNum);
 }
 
@@ -1315,7 +1327,7 @@ LinearLayout LinearEncodingTrait::toLinearLayout(const LinearLayout &ll,
 }
 
 SmallVector<unsigned>
-LinearEncodingTrait::getElemsPerThread(const LinearLayout &ll, MLIRContext *ctx,
+LinearEncodingTrait::getElemsPerThread(const LinearLayout &ll,
                                        ArrayRef<unsigned> repOrder,
                                        ArrayRef<int64_t> shape) {
   // When broadcasting the layout the shape changes, otherwise the shape is
@@ -1324,19 +1336,20 @@ LinearEncodingTrait::getElemsPerThread(const LinearLayout &ll, MLIRContext *ctx,
   // the invariant that the shape of the LL is that of the tensor
   // We choose the former for BC
   auto scaledLL = toLinearLayout(ll, repOrder, shape);
-  auto kRegister = StringAttr::get(ctx, "register");
+  auto kRegister = StringAttr::get(getContextFromLL(ll), "register");
   return basesPerDimImpl(scaledLL.getBases(), kRegister,
                          scaledLL.getNumOutDims(), /*skipBroadcast=*/false);
 }
 
-unsigned LinearEncodingTrait::getTotalElemsPerThread(
-    const LinearLayout &ll, MLIRContext *ctx, ArrayRef<unsigned> repOrder,
-    ArrayRef<int64_t> shape) {
-  return product(getElemsPerThread(ll, ctx, repOrder, shape));
+unsigned
+LinearEncodingTrait::getTotalElemsPerThread(const LinearLayout &ll,
+                                            ArrayRef<unsigned> repOrder,
+                                            ArrayRef<int64_t> shape) {
+  return product(getElemsPerThread(ll, repOrder, shape));
 }
 
 CGAEncodingAttr LinearEncodingAttr::getCGALayout() const {
-  return LinearEncodingTrait::getCGALayout(getLinearLayout(), getContext());
+  return LinearEncodingTrait::getCGALayout(getLinearLayout());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1400,7 +1413,7 @@ Attribute GenericLinearEncodingAttr::parse(AsmParser &parser, Type type) {
 }
 
 CGAEncodingAttr GenericLinearEncodingAttr::getCGALayout() const {
-  return LinearEncodingTrait::getCGALayout(getLinearLayout(), getContext());
+  return LinearEncodingTrait::getCGALayout(getLinearLayout());
 }
 
 //===----------------------------------------------------------------------===//
