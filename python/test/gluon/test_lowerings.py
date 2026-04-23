@@ -414,6 +414,56 @@ def test_broadcast_generic_linear(src_layout, device):
     torch.testing.assert_close(z, x[:, None] + y[None, :])
 
 
+@pytest.mark.parametrize("src_layout", _filter_layouts(_swizzled_warp_layouts()))
+def test_local_load_store_generic_linear(src_layout, device):
+    """Round-trip through shared memory using a swizzled/non-injective DistributedLinearLayout.
+
+    Exercises local_store (smem.store) and local_load (smem.load) lowerings for
+    GenericLinearEncoding sources.
+    """
+    shape = src_layout.shape
+    num_warps = 2**len(src_layout.warp_bases)
+
+    if len(shape) == 1:
+        N, = shape
+        shared_layout = ttgl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
+
+        @gluon.jit
+        def kernel(x_ptr, y_ptr, N: ttgl.constexpr, layout: ttgl.constexpr, shared_layout: ttgl.constexpr):
+            offs = ttgl.arange(0, N, layout=layout)
+            x = ttgl.load(x_ptr + offs)
+            smem = ttgl.allocate_shared_memory(x.dtype, [N], shared_layout)
+            smem.store(x)
+            y = smem.load(layout)
+            ttgl.store(y_ptr + offs, y)
+
+        torch.manual_seed(0)
+        x = torch.randn(N, dtype=torch.float32, device=device)
+        y = torch.empty_like(x)
+        kernel[(1, )](x, y, N, src_layout, shared_layout, num_warps=num_warps)
+    else:
+        M, N = shape
+        shared_layout = ttgl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
+
+        @gluon.jit
+        def kernel(x_ptr, y_ptr, M: ttgl.constexpr, N: ttgl.constexpr, layout: ttgl.constexpr,
+                   shared_layout: ttgl.constexpr):
+            offs_m = ttgl.arange(0, M, layout=ttgl.SliceLayout(1, layout))[:, None]
+            offs_n = ttgl.arange(0, N, layout=ttgl.SliceLayout(0, layout))[None, :]
+            x = ttgl.load(x_ptr + offs_m * N + offs_n)
+            smem = ttgl.allocate_shared_memory(x.dtype, [M, N], shared_layout)
+            smem.store(x)
+            y = smem.load(layout)
+            ttgl.store(y_ptr + offs_m * N + offs_n, y)
+
+        torch.manual_seed(0)
+        x = torch.randn((M, N), dtype=torch.float32, device=device)
+        y = torch.empty_like(x)
+        kernel[(1, )](x, y, M, N, src_layout, shared_layout, num_warps=num_warps)
+
+    torch.testing.assert_close(y, x)
+
+
 def _funky_reduce_layouts():
 
     def ilog2(x):
