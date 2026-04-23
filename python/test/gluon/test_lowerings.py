@@ -153,6 +153,14 @@ def _swizzled_warp_layouts_1d():
             block_bases=[],
             shape=[512],
         ),
+        # Non-power-of-two basis (96 = 64 + 32) in the warp bases
+        ttgl.DistributedLinearLayout(
+            reg_bases=[[1], [2]],
+            lane_bases=[[4], [8], [16], [32], [64]] + ([[0]] * (ilog2(THREADS_PER_WARP) - 5)),
+            warp_bases=[[96], [128]],
+            block_bases=[],
+            shape=[256],
+        ),
     ]
 
 
@@ -194,6 +202,14 @@ def _swizzled_warp_layouts_2d():
             warp_bases=[[32, 0], [16, 0]],
             block_bases=[],
             shape=[64, 32],
+        ),
+        # non-power-of-two basis (24 = 16 + 8) in the warp bases
+        ttgl.DistributedLinearLayout(
+            reg_bases=[[1, 0], [0, 1]],
+            lane_bases=[[2, 0], [4, 0], [8, 0], [0, 2], [0, 4]] + ([[0, 0]] * (ilog2(THREADS_PER_WARP) - 5)),
+            warp_bases=[[24, 0], [0, 8]],
+            block_bases=[],
+            shape=[32, 16],
         ),
     ]
 
