@@ -284,11 +284,11 @@ actionAdditiveStrides(const LinearLayout &layout, const LinearLayout addrLayout,
   // `regsPerInst`. In particular, callers do not need to pre-zero those bases
   // for the invariant to hold.
   assert(layout.getNumInDims() != 0);
-  assert(regsPerInst >= 1 && llvm::isPowerOf2_64(regsPerInst) &&
-         "regsPerInst must be a positive power of two");
+  assert(llvm::isPowerOf2_64(regsPerInst) &&
+         "regsPerInst must be a power of two");
   auto kReg = *layout.getInDimNames().begin();
   assert(kReg.str() == "register");
-  const int regBasisPerVec = llvm::Log2_64(regsPerInst);
+  const size_t regBasisPerVec = llvm::Log2_64(regsPerInst);
   uint32_t bits = maskSpanOffsets;
   auto addrNamedBases = addrLayout.flattenOuts().getBases();
   for (auto bases : llvm::make_second_range(addrNamedBases)) {
@@ -298,11 +298,10 @@ actionAdditiveStrides(const LinearLayout &layout, const LinearLayout addrLayout,
   }
   SmallVector<size_t> front, back;
   auto layoutNamedBases = layout.flattenOuts().getBases();
-  assert(static_cast<int>(layoutNamedBases.lookup(kReg).size()) >=
-             regBasisPerVec &&
+  assert(layoutNamedBases.lookup(kReg).size() >= regBasisPerVec &&
          "layout must have at least log2(regsPerInst) register bases");
   for (auto [idx, basis] : llvm::enumerate(layoutNamedBases.lookup(kReg))) {
-    if (static_cast<int>(idx) < regBasisPerVec || (basis[0] & bits) == 0) {
+    if (idx < regBasisPerVec || (basis[0] & bits) == 0) {
       front.push_back(idx);
     } else {
       back.push_back(idx);
