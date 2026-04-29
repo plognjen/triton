@@ -556,7 +556,7 @@ struct MemDescSubsliceOpConversion
     // For PartitionedSharedEncoding we need to pick the right base at load
     // time. Let
     //   o     = this op's static subslice offsets (one per dim),
-    //   c     = a logical coord into the destination subslice,
+    //   c     = a logical base indices to the current subslice op,
     //   L     = the shared LL (inputs: offset, partition, block;
     //                          outputs: dim0, dim1, ...).
     //
