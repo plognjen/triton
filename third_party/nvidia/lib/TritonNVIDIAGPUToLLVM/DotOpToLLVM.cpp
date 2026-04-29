@@ -64,7 +64,7 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
                   ConversionPatternRewriter &rewriter) const override {
     // D = A * B + C
     Value D = op.getResult();
-    auto dType = cast<RankedTensorType>(op.getResult().getType());
+    auto dType = op.getResult().getType();
     auto dEncoding = dType.getEncoding();
 
     if (!isPermutationMatrixLayout(toLinearLayout(dType.getShape(), dEncoding)))

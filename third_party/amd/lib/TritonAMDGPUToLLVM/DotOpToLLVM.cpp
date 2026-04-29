@@ -41,7 +41,7 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
   matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // D = A * B + C
-    auto dType = cast<RankedTensorType>(op.getResult().getType());
+    auto dType = op.getD().getType();
     auto dEncoding = dType.getEncoding();
 
     // WMMA is the only path that has been validated against non-permutation
@@ -75,7 +75,7 @@ struct ScaledDotOpConversion
   LogicalResult
   matchAndRewrite(triton::DotScaledOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto dType = cast<RankedTensorType>(op.getResult().getType());
+    auto dType = op.getD().getType();
     auto dEncoding = dType.getEncoding();
 
     if (isa<AMDWmmaEncodingAttr>(dEncoding))

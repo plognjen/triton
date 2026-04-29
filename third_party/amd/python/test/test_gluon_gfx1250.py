@@ -417,15 +417,14 @@ def gemm_async_pipelined_kernel(a_ptr, b_ptr, c_ptr,  #
 
     if RESOLVE_PARTITION_CONFLICTS:
         # The padded layouts above are reinterpreted as per-piece sublayouts here.
-        _GEMM_LAYOUTS: ttgl.constexpr = ttgl.make_partitioned_gemm_layouts(BLOCK_M, BLOCK_N, padded_a, padded_b, 4,
-                                                                           [16, 16, 32], a_transposed=False,
-                                                                           b_transposed=IS_B_K_CONTIG)
+        _DOT_LAYOUTS: ttgl.constexpr = ttgl.amd.gfx1250.make_partitioned_dot_layouts(
+            BLOCK_M, BLOCK_N, padded_a, padded_b, 4, [16, 16, 32], a_transposed=False, b_transposed=IS_B_K_CONTIG)
     else:
-        _GEMM_LAYOUTS: ttgl.constexpr = ttgl.GemmLayouts(
-            padded_a, padded_b, ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32]))
-    SHARED_LAYOUT_A: ttgl.constexpr = _GEMM_LAYOUTS.shared_layout_a
-    SHARED_LAYOUT_B: ttgl.constexpr = _GEMM_LAYOUTS.shared_layout_b
-    WMMA_LAYOUT: ttgl.constexpr = _GEMM_LAYOUTS.wmma_layout
+        _DOT_LAYOUTS: ttgl.constexpr = (padded_a, padded_b,
+                                        ttgl.amd.AMDWMMALayout(3, True, [[0, 1], [1, 0]], [], [16, 16, 32]))
+    SHARED_LAYOUT_A: ttgl.constexpr = _DOT_LAYOUTS[0]
+    SHARED_LAYOUT_B: ttgl.constexpr = _DOT_LAYOUTS[1]
+    WMMA_LAYOUT: ttgl.constexpr = _DOT_LAYOUTS[2]
 
     OPERAND_LAYOUT_A: ttgl.constexpr = ttgl.DotOperandLayout(0, WMMA_LAYOUT, 8)
     OPERAND_LAYOUT_B: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA_LAYOUT, 8)
@@ -582,7 +581,7 @@ def test_compile_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, AS
         if ASYNC_LOAD_TYPE == "ASYNC_COPY":
             pytest.skip("AsyncCopy is not supported with partition shared layouts")
         # The kernel uses num_warps=4 and instr_shape=[16, 16, 32], which gives
-        # WARP_TILES_M=4 and WARP_TILES_N=2 (see make_partitioned_gemm_layouts).
+        # WARP_TILES_M=4 and WARP_TILES_N=2 (see make_partitioned_dot_layouts).
         # The minimum partitionable tile size is WARP_TILES_{M,N} * instr_shape[{0,1}].
         min_block_m = 4 * 16
         min_block_n = 2 * 16
@@ -657,7 +656,7 @@ def test_runtime_gemm_async_pipelined(BLOCK_M, BLOCK_N, BLOCK_K, NUM_BUFFERS, M,
         if ASYNC_LOAD_TYPE == "ASYNC_COPY":
             pytest.skip("AsyncCopy is not supported with partition shared layouts")
         # The kernel uses num_warps=4 and instr_shape=[16, 16, 32], which gives
-        # WARP_TILES_M=4 and WARP_TILES_N=2 (see make_partitioned_gemm_layouts).
+        # WARP_TILES_M=4 and WARP_TILES_N=2 (see make_partitioned_dot_layouts).
         # The minimum partitionable tile size is WARP_TILES_{M,N} * instr_shape[{0,1}].
         min_block_m = 4 * 16
         min_block_n = 2 * 16
